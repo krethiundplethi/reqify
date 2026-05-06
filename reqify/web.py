@@ -20,6 +20,8 @@ from .session_store import (
     export_session,
     history_payload,
     load_payload,
+    object_text_at_commit,
+    payload_at_commit,
     repo_dir,
     save_session,
 )
@@ -102,7 +104,11 @@ class ReqifyHandler(BaseHTTPRequestHandler):
                 if not isinstance(updates, dict):
                     self.send_error_json(HTTPStatus.BAD_REQUEST, "Invalid save payload")
                     return
-                self.send_json(save_session(session_id, updates))
+                viewed_commit = str(payload.get("viewedCommit", ""))
+                try:
+                    self.send_json(save_session(session_id, updates, viewed_commit))
+                except ValueError as exc:
+                    self.send_error_json(HTTPStatus.CONFLICT, str(exc))
             elif path == "/api/agent/analyze":
                 payload = json.loads(self.read_body().decode("utf-8"))
                 session_id = payload.get("sessionId")
@@ -126,6 +132,33 @@ class ReqifyHandler(BaseHTTPRequestHandler):
                     )
                 except AgentBackendError as exc:
                     self.send_error_json(HTTPStatus.SERVICE_UNAVAILABLE, str(exc))
+            elif path.startswith("/api/session/") and path.endswith("/object-text"):
+                session_id = path.split("/")[3]
+                payload = json.loads(self.read_body().decode("utf-8"))
+                commit = str(payload.get("commit", ""))
+                object_id = str(payload.get("objectId", ""))
+                if not re.fullmatch(r"[a-f0-9]{7,40}", commit):
+                    self.send_error_json(HTTPStatus.BAD_REQUEST, "Invalid commit")
+                    return
+                if not object_id:
+                    self.send_error_json(HTTPStatus.BAD_REQUEST, "Invalid object")
+                    return
+                try:
+                    self.send_json(object_text_at_commit(session_id, commit, object_id))
+                except ValueError as exc:
+                    self.send_error_json(HTTPStatus.NOT_FOUND, str(exc))
+            elif path.startswith("/api/session/") and path.endswith("/commit-payload"):
+                session_id = path.split("/")[3]
+                payload = json.loads(self.read_body().decode("utf-8"))
+                commit = str(payload.get("commit", ""))
+                if not re.fullmatch(r"[a-f0-9]{7,40}", commit):
+                    self.send_error_json(HTTPStatus.BAD_REQUEST, "Invalid commit")
+                    return
+                try:
+                    commit_payload = payload_at_commit(session_id, commit)
+                    self.send_json({"commit": commit, "objects": commit_payload.get("objects", {})})
+                except ValueError as exc:
+                    self.send_error_json(HTTPStatus.NOT_FOUND, str(exc))
             elif path.startswith("/api/session/") and path.endswith("/checkout"):
                 session_id = path.split("/")[3]
                 payload = json.loads(self.read_body().decode("utf-8"))

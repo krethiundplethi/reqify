@@ -27,7 +27,7 @@ The implementation uses only the Python standard library and browser-native Java
 
 The agent panel posts to `/api/agent/analyze`. Successful responses are reserved for text returned by an implemented LLM backend; unavailable or unimplemented backends return a JSON error with the reason.
 
-Agent responses must be machine-readable JSON with a human-readable `markdown` field and an `edits` array that identifies the target ReqIF object and attribute. The browser renders the markdown as XHTML and uses the edits for `Apply & Next`.
+Agent responses must be machine-readable JSON with a human-readable `markdown` field and an `edits` array that identifies the target ReqIF object and attribute. Reqify validates this JSON before returning it to the browser. The browser renders the markdown as XHTML and uses the edits for `Apply & Next`.
 
 Configure `REQIFY_AGENT_PROMPT` to replace the default system prompt and `REQIFY_AGENT_BACKEND` to select a backend:
 

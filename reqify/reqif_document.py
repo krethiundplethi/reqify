@@ -31,6 +31,7 @@ class ReqifDocument:
         self.attribute_defs = self._attribute_definitions()
         self.definition_names = self._definition_names()
         self.spec_object_type_names = self._spec_object_type_names()
+        self.spec_object_type_attribute_ids = self._spec_object_type_attribute_ids()
         self.spec_objects = self._spec_objects()
 
     def _definition_names(self) -> dict[str, str]:
@@ -51,6 +52,24 @@ class ReqifDocument:
             if identifier:
                 names[identifier] = element.get("LONG-NAME") or element.get("DESC") or identifier
         return names
+
+    def _spec_object_type_attribute_ids(self) -> dict[str, list[str]]:
+        attribute_ids: dict[str, list[str]] = {}
+        for element in self.root.iter():
+            if local_name(element.tag) != "SPEC-OBJECT-TYPE":
+                continue
+            type_id = element.get("IDENTIFIER")
+            if not type_id:
+                continue
+            ids = []
+            for nested in element.iter():
+                if not local_name(nested.tag).startswith("ATTRIBUTE-DEFINITION"):
+                    continue
+                definition_id = nested.get("IDENTIFIER")
+                if definition_id:
+                    ids.append(definition_id)
+            attribute_ids[type_id] = ids
+        return attribute_ids
 
     def _enum_options_by_datatype(self) -> dict[str, list[dict[str, str]]]:
         datatypes: dict[str, list[dict[str, str]]] = {}
@@ -158,32 +177,46 @@ class ReqifDocument:
     def _object_attributes(self, spec_object: ET.Element) -> list[dict[str, object]]:
         values = direct_container(spec_object, "VALUES")
         attributes: list[dict[str, object]] = []
-        if values is None:
-            return attributes
-        for value_element in list(values):
-            if not local_name(value_element.tag).startswith("ATTRIBUTE-VALUE"):
+        if values is not None:
+            for value_element in list(values):
+                if not local_name(value_element.tag).startswith("ATTRIBUTE-VALUE"):
+                    continue
+                attr_id = self._attribute_ref(value_element)
+                kind, value = self._value_payload(value_element)
+                attributes.append(self._attribute_payload(attr_id, kind, value))
+        existing_ids = {str(attribute["id"]) for attribute in attributes}
+        type_id = self._spec_object_type_ref(spec_object)
+        for attr_id in self.spec_object_type_attribute_ids.get(type_id, []):
+            if attr_id in existing_ids or not self._is_verification_criteria_definition(attr_id):
                 continue
-            attr_id = self._attribute_ref(value_element)
-            kind, value = self._value_payload(value_element)
             definition = self.attribute_defs.get(attr_id, {})
-            options = definition.get("options", [])
-            selected_labels = []
-            if kind == "enumeration" and isinstance(value, list):
-                labels_by_id = {str(option["id"]): str(option["label"]) for option in options if isinstance(option, dict)}
-                selected_labels = [labels_by_id.get(str(ref), str(ref)) for ref in value]
-            attributes.append(
-                {
-                    "id": attr_id,
-                    "name": self.definition_names.get(attr_id, attr_id),
-                    "type": kind,
-                    "value": value,
-                    "displayValue": ", ".join(selected_labels) if selected_labels else value,
-                    "multiple": bool(definition.get("multiple")) if kind == "enumeration" else False,
-                    "options": options if kind == "enumeration" else [],
-                    "editable": kind in {"xhtml", "string", "integer", "real", "date", "boolean", "enumeration"},
-                }
-            )
+            kind = str(definition.get("kind", "string"))
+            attributes.append(self._attribute_payload(attr_id, kind, "", missing=True))
         return attributes
+
+    def _attribute_payload(self, attr_id: str, kind: str, value: object, missing: bool = False) -> dict[str, object]:
+        definition = self.attribute_defs.get(attr_id, {})
+        options = definition.get("options", [])
+        selected_labels = []
+        if kind == "enumeration" and isinstance(value, list):
+            labels_by_id = {str(option["id"]): str(option["label"]) for option in options if isinstance(option, dict)}
+            selected_labels = [labels_by_id.get(str(ref), str(ref)) for ref in value]
+        return {
+            "id": attr_id,
+            "name": self.definition_names.get(attr_id, attr_id),
+            "type": kind,
+            "value": value,
+            "displayValue": ", ".join(selected_labels) if selected_labels else value,
+            "multiple": bool(definition.get("multiple")) if kind == "enumeration" else False,
+            "options": options if kind == "enumeration" else [],
+            "editable": kind in {"xhtml", "string", "integer", "real", "date", "boolean", "enumeration"},
+            "missing": missing,
+        }
+
+    def _is_verification_criteria_definition(self, attr_id: str) -> bool:
+        name = self.definition_names.get(attr_id, attr_id)
+        key = "".join(char for char in name.lower() if char.isalnum())
+        return "verification" in key and ("criteria" in key or "criterion" in key)
 
     def _title_for(self, spec_id: str, attributes: list[dict[str, object]] | None = None) -> str:
         attrs = attributes if attributes is not None else self._object_attributes(self.spec_objects[spec_id])
@@ -294,7 +327,9 @@ class ReqifDocument:
                 continue
             values = direct_container(spec_object, "VALUES")
             if values is None:
-                continue
+                values = ET.Element(qualified_like(spec_object, "VALUES"))
+                spec_object.insert(0, values)
+            applied_ids = set()
             for value_element in list(values):
                 if not local_name(value_element.tag).startswith("ATTRIBUTE-VALUE"):
                     continue
@@ -319,6 +354,37 @@ class ReqifDocument:
                     if the_value is not None:
                         the_value.clear()
                         the_value.text = value
+                applied_ids.add(attr_id)
+            type_id = self._spec_object_type_ref(spec_object)
+            allowed_ids = set(self.spec_object_type_attribute_ids.get(type_id, []))
+            for attr_id, update in attr_updates.items():
+                if attr_id in applied_ids or attr_id not in allowed_ids or not isinstance(update, dict) or "value" not in update:
+                    continue
+                definition = self.attribute_defs.get(str(attr_id), {})
+                kind = str(definition.get("kind", ""))
+                if kind not in {"xhtml", "string", "integer", "real", "date", "boolean", "enumeration"}:
+                    continue
+                value_element = self._create_value_element(values, str(attr_id), kind)
+                self._apply_value_update(value_element, update["value"])
+
+    def _create_value_element(self, values: ET.Element, attr_id: str, kind: str) -> ET.Element:
+        value_element = ET.SubElement(values, qualified_like(values, f"ATTRIBUTE-VALUE-{kind.upper()}"))
+        definition = ET.SubElement(value_element, qualified_like(values, "DEFINITION"))
+        ref = ET.SubElement(definition, qualified_like(values, f"ATTRIBUTE-DEFINITION-{kind.upper()}-REF"))
+        ref.text = attr_id
+        return value_element
+
+    def _apply_value_update(self, value_element: ET.Element, raw_value: object) -> None:
+        if local_name(value_element.tag) == "ATTRIBUTE-VALUE-ENUMERATION":
+            self._apply_enum_update(value_element, raw_value)
+        elif local_name(value_element.tag) == "ATTRIBUTE-VALUE-XHTML":
+            the_value = first_child(value_element, "THE-VALUE")
+            if the_value is None:
+                the_value = ET.Element(qualified_like(value_element, "THE-VALUE"))
+                value_element.insert(0, the_value)
+            replace_xhtml_value(the_value, str(raw_value))
+        else:
+            value_element.set("THE-VALUE", str(raw_value))
 
     def _apply_enum_update(self, value_element: ET.Element, raw_value: object) -> None:
         if isinstance(raw_value, list):

@@ -6,9 +6,19 @@ const state = {
   documentOrder: [],
   outlineNumbers: {},
   selectedId: null,
+  headCommit: "",
   history: [],
   historyIndex: 0,
+  selectedHistoryIndex: 0,
   agentSuggestion: null,
+  localModifiedObjectIds: new Set(),
+  comparisonModifiedObjectIds: new Set(),
+  selectedHistoryObjects: null,
+  documentFilters: {
+    modified: false,
+    requirements: false,
+    emptyVerificationCriteria: false,
+  },
   dirty: false,
 };
 
@@ -19,7 +29,12 @@ const els = {
   status: document.getElementById("status"),
   tree: document.getElementById("tree"),
   documentView: document.getElementById("documentView"),
+  filterModified: document.getElementById("filterModified"),
+  filterRequirements: document.getElementById("filterRequirements"),
+  filterEmptyVerificationCriteria: document.getElementById("filterEmptyVerificationCriteria"),
   attributesView: document.getElementById("attributesView"),
+  rightStack: document.querySelector(".right-stack"),
+  rightResize: document.getElementById("rightResize"),
   historyView: document.getElementById("historyView"),
   historyBack: document.getElementById("historyBack"),
   historyForward: document.getElementById("historyForward"),
@@ -27,6 +42,11 @@ const els = {
   agentAnalyze: document.getElementById("agentAnalyze"),
   agentApplyNext: document.getElementById("agentApplyNext"),
   agentResponse: document.getElementById("agentResponse"),
+  agentPreview: document.getElementById("agentPreview"),
+  diffModal: document.getElementById("diffModal"),
+  diffTitle: document.getElementById("diffTitle"),
+  diffText: document.getElementById("diffText"),
+  diffClose: document.getElementById("diffClose"),
 };
 
 function setStatus(text, dirty = state.dirty) {
@@ -131,15 +151,20 @@ function ingest(payload) {
   state.objects = payload.objects || {};
   state.documentOrder = payload.documentOrder || Object.keys(state.objects);
   state.outlineNumbers = payload.outlineNumbers || {};
+  state.headCommit = payload.headCommit || "";
   state.history = payload.history || [];
   state.historyIndex = 0;
+  state.selectedHistoryIndex = 0;
   state.agentSuggestion = null;
+  state.localModifiedObjectIds = new Set();
+  state.comparisonModifiedObjectIds = new Set();
+  state.selectedHistoryObjects = null;
   state.selectedId = state.selectedId && state.objects[state.selectedId] ? state.selectedId : state.documentOrder[0] || null;
   state.dirty = false;
   render();
   setStatus(state.fileName || "Loaded");
-  els.saveButton.disabled = false;
   els.exportButton.disabled = false;
+  updateSaveState();
   updateAgentApplyState();
 }
 
@@ -153,9 +178,37 @@ async function apiJson(url, options = {}) {
   return payload;
 }
 
-function markDirty() {
+function markDirty(objectId = null) {
   state.dirty = true;
+  if (objectId) {
+    state.localModifiedObjectIds.add(objectId);
+    if (state.selectedHistoryObjects) recomputeComparisonModifiedObjectIds();
+    updateDocumentModificationState(objectId);
+  }
   setStatus(`${state.fileName} • unsaved`, true);
+  updateSaveState();
+}
+
+function viewedCommit() {
+  return state.history[state.historyIndex]?.hash || state.headCommit || "";
+}
+
+function isViewingHead() {
+  return Boolean(state.sessionId) && (!state.history.length || viewedCommit() === state.headCommit);
+}
+
+function updateSaveState() {
+  els.saveButton.disabled = !isViewingHead();
+  els.saveButton.title = isViewingHead() ? "Commit edits" : "Checkout HEAD before saving";
+}
+
+function effectiveModifiedObjectIds() {
+  return state.selectedHistoryObjects ? state.comparisonModifiedObjectIds : state.localModifiedObjectIds;
+}
+
+function setRightSplit(agentPercent) {
+  const clamped = Math.min(72, Math.max(24, agentPercent));
+  els.rightStack.style.gridTemplateRows = `minmax(140px, 1fr) 8px minmax(180px, ${clamped}%)`;
 }
 
 function getAttribute(objectId, attrId) {
@@ -183,6 +236,28 @@ function reqifTextAttr(object) {
   return object.attributes.find(isReqifText);
 }
 
+function isVerificationCriteria(attr) {
+  const key = attrKey(attr);
+  return key.includes("verification") && (key.includes("criteria") || key.includes("criterion"));
+}
+
+function isEmptyAttributeValue(value) {
+  if (Array.isArray(value)) return value.length === 0;
+  return !plainText(value);
+}
+
+function hasEmptyOrNoVerificationCriteria(object) {
+  const verificationAttrs = object.attributes.filter(isVerificationCriteria);
+  return !verificationAttrs.length || verificationAttrs.some((attr) => attr.missing || isEmptyAttributeValue(attr.value));
+}
+
+function currentRequirementText() {
+  const object = state.objects[state.selectedId];
+  if (!object) return "";
+  const attr = reqifTextAttr(object);
+  return attr ? plainText(attr.value) : "";
+}
+
 function objectKind(object) {
   const typeValues = [object.objectTypeName, object.objectTypeId];
   object.attributes.forEach((attr) => {
@@ -202,7 +277,40 @@ function agentEditsForSelection() {
 }
 
 function updateAgentApplyState() {
-  els.agentApplyNext.disabled = !agentEditsForSelection().length;
+  const edits = agentEditsForSelection();
+  els.agentApplyNext.disabled = !edits.length;
+  renderAgentPreview(edits);
+}
+
+function renderAgentPreview(edits = agentEditsForSelection()) {
+  els.agentPreview.innerHTML = "";
+  if (!edits.length) {
+    els.agentPreview.className = "agent-preview empty-state";
+    els.agentPreview.textContent = "No pending changes";
+    return;
+  }
+  els.agentPreview.className = "agent-preview";
+  edits.forEach((edit) => {
+    const object = state.objects[edit.objectId || state.selectedId];
+    const attr = object ? findEditableAttribute(object, edit) : null;
+    const label = attr?.name || edit.attributeName || edit.attributeId || "Field";
+    const nextValue = attr ? agentEditValueForAttribute(attr, edit) : edit.valueMarkdown || edit.valueXhtml || "";
+    const row = document.createElement("label");
+    row.className = "agent-preview-edit";
+    const name = document.createElement("div");
+    name.className = "agent-preview-label";
+    name.textContent = label;
+    const editor = renderXhtmlEditor(edit.objectId || state.selectedId || "", { id: edit.attributeId || attr?.id || "", value: nextValue, editable: true }, "agent preview");
+    const editable = editor.querySelector(".xhtml-editor");
+    editable.addEventListener("input", () => {
+      const value = editable.innerHTML || "";
+      edit.valueMarkdown = plainText(value);
+      edit.valueXhtml = value;
+    });
+    row.appendChild(name);
+    row.appendChild(editor);
+    els.agentPreview.appendChild(row);
+  });
 }
 
 function updateAttribute(objectId, attrId, value) {
@@ -210,7 +318,7 @@ function updateAttribute(objectId, attrId, value) {
   if (!attr || attr.value === value) return;
   attr.value = value;
   state.objects[objectId].title = computeTitle(state.objects[objectId]);
-  markDirty();
+  markDirty(objectId);
 }
 
 function computeTitle(object) {
@@ -292,6 +400,36 @@ function renderTreeNodes(nodes, parent) {
   });
 }
 
+function shouldShowDocumentObject(objectId) {
+  const object = state.objects[objectId];
+  if (!object || !reqifTextAttr(object)) return false;
+  if (state.documentFilters.modified && !effectiveModifiedObjectIds().has(objectId)) return false;
+  if (state.documentFilters.requirements && objectKind(object) !== "requirement") return false;
+  if (state.documentFilters.emptyVerificationCriteria && !hasEmptyOrNoVerificationCriteria(object)) return false;
+  return true;
+}
+
+function outlineLevel(objectId) {
+  const number = String(state.outlineNumbers[objectId] || "");
+  if (!number) return 0;
+  return number.split(".").filter(Boolean).length;
+}
+
+function chapterHasVisibleContent(index) {
+  const level = outlineLevel(state.documentOrder[index]);
+  for (let offset = index + 1; offset < state.documentOrder.length; offset += 1) {
+    const objectId = state.documentOrder[offset];
+    const object = state.objects[objectId];
+    if (!object) continue;
+    if (chapterNameAttr(object)) {
+      const nextLevel = outlineLevel(objectId);
+      if (!level || (nextLevel && nextLevel <= level)) return false;
+    }
+    if (reqifTextAttr(object) && shouldShowDocumentObject(objectId)) return true;
+  }
+  return false;
+}
+
 function renderDocument() {
   els.documentView.innerHTML = "";
   els.documentView.className = "document-view";
@@ -300,12 +438,15 @@ function renderDocument() {
     els.documentView.textContent = "No content";
     return;
   }
-  state.documentOrder.forEach((objectId) => {
+  let rendered = 0;
+  state.documentOrder.forEach((objectId, index) => {
     const object = state.objects[objectId];
     if (!object) return;
     const chapterAttr = chapterNameAttr(object);
     const textAttr = reqifTextAttr(object);
     if (!chapterAttr && !textAttr) return;
+    if (textAttr && !shouldShowDocumentObject(objectId)) return;
+    if (chapterAttr && !textAttr && !chapterHasVisibleContent(index)) return;
     const item = document.createElement("article");
     item.className = `document-item${chapterAttr ? " chapter-item" : ""}${objectId === state.selectedId ? " active" : ""}`;
     item.dataset.objectId = objectId;
@@ -318,7 +459,12 @@ function renderDocument() {
       if (!event.target.closest(".editor-toolbar")) selectObject(objectId);
     });
     els.documentView.appendChild(item);
+    rendered += 1;
   });
+  if (!rendered) {
+    els.documentView.className = "document-view empty-state";
+    els.documentView.textContent = "No matching content";
+  }
 }
 
 function renderChapterHeading(objectId, attr) {
@@ -334,7 +480,7 @@ function renderDocumentText(objectId, attr) {
   const object = state.objects[objectId];
   const kind = objectKind(object);
   const body = document.createElement("section");
-  body.className = `document-text ${kind === "info" ? "info-item" : "requirement-item"}`;
+  body.className = `document-text ${kind === "info" ? "info-item" : "requirement-item"}${effectiveModifiedObjectIds().has(objectId) ? " modified-item" : ""}`;
   const icon = document.createElement("div");
   icon.className = "document-kind-icon";
   icon.title = kind === "info" ? "Information" : "Requirement";
@@ -563,6 +709,51 @@ function syncEditors(objectId, attrId, value, source) {
   renderTree();
 }
 
+function normalizedAttributeValue(attr) {
+  const value = attr?.value;
+  if (Array.isArray(value)) return value.map(String).sort().join("\u0001");
+  if (attr?.type === "xhtml") return plainText(value);
+  return String(value ?? "").trim();
+}
+
+function comparableAttributes(object) {
+  const values = new Map();
+  (object?.attributes || []).forEach((attr) => {
+    if (!attr?.id) return;
+    values.set(String(attr.id), normalizedAttributeValue(attr));
+  });
+  return values;
+}
+
+function objectDiffersFromSnapshot(object, snapshotObject) {
+  if (!snapshotObject) return true;
+  const current = comparableAttributes(object);
+  const snapshot = comparableAttributes(snapshotObject);
+  const ids = new Set([...current.keys(), ...snapshot.keys()]);
+  for (const id of ids) {
+    if ((current.get(id) || "") !== (snapshot.get(id) || "")) return true;
+  }
+  return false;
+}
+
+function recomputeComparisonModifiedObjectIds() {
+  const next = new Set();
+  const snapshotObjects = state.selectedHistoryObjects || {};
+  Object.entries(state.objects).forEach(([objectId, object]) => {
+    if (!reqifTextAttr(object)) return;
+    if (objectDiffersFromSnapshot(object, snapshotObjects[objectId])) next.add(objectId);
+  });
+  state.comparisonModifiedObjectIds = next;
+}
+
+function updateDocumentModificationState(objectId) {
+  const modified = effectiveModifiedObjectIds().has(objectId);
+  document.querySelectorAll(`.document-item[data-object-id="${CSS.escape(objectId)}"] .document-text`).forEach((node) => {
+    node.classList.toggle("modified-item", modified);
+  });
+  if (state.documentFilters.modified && !shouldShowDocumentObject(objectId)) renderDocument();
+}
+
 function renderHistory() {
   els.historyView.innerHTML = "";
   if (!state.history.length) {
@@ -570,21 +761,167 @@ function renderHistory() {
     els.historyView.textContent = "No commits";
     els.historyBack.disabled = true;
     els.historyForward.disabled = true;
+    updateSaveState();
     return;
   }
   els.historyView.className = "history-view";
   state.history.forEach((entry, index) => {
-    const button = document.createElement("button");
-    button.className = `history-entry${index === state.historyIndex ? " active" : ""}`;
-    button.innerHTML = `
+    const row = document.createElement("div");
+    row.className = `history-entry${index === state.historyIndex ? " checked-out" : ""}${index === state.selectedHistoryIndex ? " selected" : ""}`;
+    row.tabIndex = 0;
+    row.innerHTML = `
       <div class="history-subject">${escapeHtml(entry.subject)}</div>
       <div class="history-meta">${escapeHtml(entry.short)} · ${escapeHtml(entry.date)}</div>
     `;
-    button.addEventListener("click", () => checkoutHistory(index));
-    els.historyView.appendChild(button);
+    row.addEventListener("click", () => selectHistoryEntry(index));
+    row.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      selectHistoryEntry(index);
+    });
+    const actions = document.createElement("div");
+    actions.className = "history-actions";
+    const diff = document.createElement("button");
+    diff.type = "button";
+    diff.className = "history-diff";
+    diff.textContent = "Diff";
+    diff.disabled = !state.selectedId;
+    diff.addEventListener("click", (event) => {
+      event.stopPropagation();
+      showHistoryDiff(index);
+    });
+    const checkout = document.createElement("button");
+    checkout.type = "button";
+    checkout.className = "history-checkout";
+    checkout.textContent = index === state.historyIndex ? "Current" : "Checkout";
+    checkout.disabled = index === state.historyIndex;
+    checkout.addEventListener("click", (event) => {
+      event.stopPropagation();
+      checkoutHistory(index);
+    });
+    actions.appendChild(diff);
+    actions.appendChild(checkout);
+    row.appendChild(actions);
+    els.historyView.appendChild(row);
   });
   els.historyBack.disabled = state.historyIndex >= state.history.length - 1;
   els.historyForward.disabled = state.historyIndex <= 0;
+  updateSaveState();
+}
+
+async function selectHistoryEntry(index) {
+  const entry = state.history[index];
+  if (!state.sessionId || !entry) return;
+  state.selectedHistoryIndex = index;
+  renderHistory();
+  try {
+    const payload = await apiJson(`/api/session/${state.sessionId}/commit-payload`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ commit: entry.hash }),
+    });
+    state.selectedHistoryObjects = payload.objects && typeof payload.objects === "object" ? payload.objects : {};
+    recomputeComparisonModifiedObjectIds();
+    renderDocument();
+    setStatus(`${state.fileName} · comparing ${entry.short}`, state.dirty);
+  } catch (error) {
+    state.selectedHistoryObjects = null;
+    state.comparisonModifiedObjectIds = new Set();
+    renderDocument();
+    setStatus(error.message, state.dirty);
+  }
+}
+
+async function showHistoryDiff(index) {
+  const entry = state.history[index];
+  if (!state.sessionId || !state.selectedId || !entry) return;
+  const currentText = currentRequirementText();
+  try {
+    const payload = await apiJson(`/api/session/${state.sessionId}/object-text`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ commit: entry.hash, objectId: state.selectedId }),
+    });
+    const previousText = String(payload.text || "");
+    openDiffModal(
+      `Diff ${entry.short}`,
+      formatPlainTextDiff(previousText, currentText, `commit ${entry.short}`, "current view"),
+    );
+  } catch (error) {
+    openDiffModal("Diff unavailable", error.message);
+  }
+}
+
+function openDiffModal(title, text) {
+  els.diffTitle.textContent = title;
+  els.diffText.value = text;
+  els.diffModal.hidden = false;
+  els.diffText.focus();
+}
+
+function closeDiffModal() {
+  els.diffModal.hidden = true;
+  els.diffText.value = "";
+}
+
+function formatPlainTextDiff(leftText, rightText, leftLabel, rightLabel) {
+  const left = splitPlainTextLines(leftText);
+  const right = splitPlainTextLines(rightText);
+  const rows = longestCommonSubsequenceRows(left, right);
+  const diff = [`--- ${leftLabel}`, `+++ ${rightLabel}`];
+  let changed = false;
+  rows.forEach((row) => {
+    if (row.type === "same") {
+      diff.push(`  ${row.text}`);
+    } else if (row.type === "remove") {
+      changed = true;
+      diff.push(`- ${row.text}`);
+    } else {
+      changed = true;
+      diff.push(`+ ${row.text}`);
+    }
+  });
+  if (!changed) return [`--- ${leftLabel}`, `+++ ${rightLabel}`, "No plaintext differences."].join("\n");
+  return diff.join("\n");
+}
+
+function splitPlainTextLines(text) {
+  const normalized = String(text || "").replace(/\r\n?/g, "\n");
+  return normalized ? normalized.split("\n") : [];
+}
+
+function longestCommonSubsequenceRows(left, right) {
+  const table = Array.from({ length: left.length + 1 }, () => Array(right.length + 1).fill(0));
+  for (let i = left.length - 1; i >= 0; i -= 1) {
+    for (let j = right.length - 1; j >= 0; j -= 1) {
+      table[i][j] = left[i] === right[j] ? table[i + 1][j + 1] + 1 : Math.max(table[i + 1][j], table[i][j + 1]);
+    }
+  }
+  const rows = [];
+  let i = 0;
+  let j = 0;
+  while (i < left.length && j < right.length) {
+    if (left[i] === right[j]) {
+      rows.push({ type: "same", text: left[i] });
+      i += 1;
+      j += 1;
+    } else if (table[i + 1][j] >= table[i][j + 1]) {
+      rows.push({ type: "remove", text: left[i] });
+      i += 1;
+    } else {
+      rows.push({ type: "add", text: right[j] });
+      j += 1;
+    }
+  }
+  while (i < left.length) {
+    rows.push({ type: "remove", text: left[i] });
+    i += 1;
+  }
+  while (j < right.length) {
+    rows.push({ type: "add", text: right[j] });
+    j += 1;
+  }
+  return rows;
 }
 
 async function checkoutHistory(index) {
@@ -598,7 +935,12 @@ async function checkoutHistory(index) {
   });
   ingest(payload);
   state.historyIndex = index;
+  state.selectedHistoryIndex = index;
+  state.selectedHistoryObjects = null;
+  state.comparisonModifiedObjectIds = new Set();
   renderHistory();
+  renderDocument();
+  updateSaveState();
   setStatus(`${state.fileName} · ${state.history[index].short}`);
 }
 
@@ -632,7 +974,7 @@ els.saveButton.addEventListener("click", async () => {
     const payload = await apiJson(`/api/session/${state.sessionId}/save`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ objects: updates }),
+      body: JSON.stringify({ objects: updates, viewedCommit: viewedCommit() }),
     });
     ingest(payload);
     setStatus(payload.committed ? `${state.fileName} · committed` : `${state.fileName} · unchanged`);
@@ -720,8 +1062,14 @@ function applyAgentSuggestionAndNext() {
 function findEditableAttribute(object, edit) {
   const byId = object.attributes.find((attr) => attr.editable && edit.attributeId && attr.id === edit.attributeId);
   if (byId) return byId;
-  const targetName = String(edit.attributeName || "").toLowerCase();
-  return object.attributes.find((attr) => attr.editable && String(attr.name || "").toLowerCase() === targetName);
+  const targetKey = comparableAttributeName(edit.attributeName || edit.attributeId);
+  return object.attributes.find((attr) => attr.editable && comparableAttributeName(attr.name || attr.id) === targetKey);
+}
+
+function comparableAttributeName(value) {
+  const key = String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (key.includes("verification") && (key.includes("criteria") || key.includes("criterion"))) return "verificationcriteria";
+  return key;
 }
 
 function agentEditValueForAttribute(attr, edit) {
@@ -762,7 +1110,43 @@ function focusDocumentEditor(objectId) {
   });
 }
 
+function bindDocumentFilter(input, key) {
+  input.addEventListener("change", () => {
+    state.documentFilters[key] = input.checked;
+    renderDocument();
+  });
+}
+
 els.agentAnalyze.addEventListener("click", analyzeWithAgent);
 els.agentApplyNext.addEventListener("click", applyAgentSuggestionAndNext);
+bindDocumentFilter(els.filterModified, "modified");
+bindDocumentFilter(els.filterRequirements, "requirements");
+bindDocumentFilter(els.filterEmptyVerificationCriteria, "emptyVerificationCriteria");
+els.rightResize.addEventListener("pointerdown", (event) => {
+  event.preventDefault();
+  els.rightResize.setPointerCapture(event.pointerId);
+  document.body.classList.add("resizing");
+  const bounds = els.rightStack.getBoundingClientRect();
+  const onMove = (moveEvent) => {
+    const agentPercent = ((bounds.bottom - moveEvent.clientY) / bounds.height) * 100;
+    setRightSplit(agentPercent);
+  };
+  const onUp = () => {
+    document.body.classList.remove("resizing");
+    els.rightResize.removeEventListener("pointermove", onMove);
+    els.rightResize.removeEventListener("pointerup", onUp);
+    els.rightResize.removeEventListener("pointercancel", onUp);
+  };
+  els.rightResize.addEventListener("pointermove", onMove);
+  els.rightResize.addEventListener("pointerup", onUp);
+  els.rightResize.addEventListener("pointercancel", onUp);
+});
+els.diffClose.addEventListener("click", closeDiffModal);
+els.diffModal.addEventListener("click", (event) => {
+  if (event.target === els.diffModal) closeDiffModal();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !els.diffModal.hidden) closeDiffModal();
+});
 els.historyBack.addEventListener("click", () => checkoutHistory(state.historyIndex + 1));
 els.historyForward.addEventListener("click", () => checkoutHistory(state.historyIndex - 1));

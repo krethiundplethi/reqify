@@ -13,11 +13,16 @@ from urllib.request import Request as UrlRequest
 from urllib.request import urlopen
 
 
-DEFAULT_AGENT_PROMPT = """As an automotive requirments engineer, analyze this requirement statement.
-Return concise, human-readable markdown and machine-readable suggested edits.
+DEFAULT_AGENT_PROMPT = """As an automotive requirements engineer, analyze this requirement statement.
+Be as concise as possible.
+Do not include what works, positive observations, risk sections, or discussion.
+Return only terse findings, one quality rating, verification criteria, and concrete suggested edits.
 
 Guidance:
 - "well_formed" considers clarity, singularity, unambiguity, measurable criteria, absence of design constraint unless intended.
+- Analyze and improve both the requirement text and Verification Criteria when those fields exist.
+- If Verification Criteria are missing or weak, include a concrete edit for the exact verification criteria attribute from context.
+- The Verification Criteria suggestion should be as concise as possible.
 """
 
 AGENT_RESPONSE_SCHEMA: dict[str, object] = {
@@ -50,7 +55,7 @@ AGENT_RESPONSE_SCHEMA: dict[str, object] = {
 
 STRUCTURED_RESPONSE_INSTRUCTIONS = """Return only JSON matching this schema:
 {
-  "markdown": "Human-readable markdown analysis. Include rating and verification hint.",
+  "markdown": "Concise markdown. Start with exactly one rating line: quality: high, quality: medium, or quality: low. Then include only terse improvement finding and verification criteria.",
   "edits": [
     {
       "objectId": "selected ReqIF object id",
@@ -62,7 +67,7 @@ STRUCTURED_RESPONSE_INSTRUCTIONS = """Return only JSON matching this schema:
   ]
 }
 
-Use edits only for fields where you propose a concrete replacement. Preserve the full intended field value, not a diff."""
+Keep markdown short. Use exactly one quality rating: high, medium, or low. Do not use numeric scores, letter grades, well_formed, or multiple ratings. No positive feedback, no risk section, no discussion. Include edits for requirement text and Verification Criteria when either needs improvement and the field exists. Keep Verification Criteria suggestions as concise as possible. Use edits only for fields where you propose a concrete replacement. Preserve the full intended field value, not a diff."""
 
 
 @dataclass(frozen=True)
@@ -106,14 +111,6 @@ class OpenAIResponsesBackend:
                 }
             ],
             "max_output_tokens": int_env("REQIFY_AGENT_MAX_OUTPUT_TOKENS", 1200),
-            "text": {
-                "format": {
-                    "type": "json_schema",
-                    "name": "reqify_agent_response",
-                    "strict": True,
-                    "schema": AGENT_RESPONSE_SCHEMA,
-                }
-            },
         }
         temperature = optional_float_env("REQIFY_AGENT_TEMPERATURE")
         if temperature is not None:
@@ -246,7 +243,14 @@ def summarize_object(selected_object: dict[str, object] | None) -> str:
             text = str(value).strip()
             if text:
                 lines.append(f"Attribute id={attr_id} name={name}: {text[:700]}")
+            elif is_verification_attribute(attr_id, name):
+                lines.append(f"Attribute id={attr_id} name={name}: <empty>")
     return "\n".join(lines)
+
+
+def is_verification_attribute(attribute_id: str, name: str) -> bool:
+    key = "".join(char for char in f"{attribute_id} {name}".lower() if char.isalnum())
+    return "verification" in key and ("criteria" in key or "criterion" in key)
 
 
 def parse_agent_response(response: str) -> dict[str, object]:

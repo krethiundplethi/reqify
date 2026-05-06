@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import tempfile
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -11,6 +12,7 @@ from pathlib import Path
 from .config import DATA_DIR, ensure_dirs, safe_name
 from .git_repo import commit_repo, init_repo, run_git
 from .reqif_document import ReqifDocument
+from .xml_utils import attribute_key, strip_markup
 
 
 def safe_extract(zip_file: zipfile.ZipFile, target: Path) -> None:
@@ -46,12 +48,18 @@ def document_path(session_id: str) -> Path:
     return repo_dir(session_id) / str(meta["documentRel"])
 
 
+def head_commit(session_id: str) -> str:
+    result = run_git(repo_dir(session_id), "rev-parse", "HEAD", check=False)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
 def load_payload(session_id: str) -> dict[str, object]:
     meta = session_meta(session_id)
     document = ReqifDocument(document_path(session_id))
     payload = document.as_payload()
     payload["sessionId"] = session_id
     payload["fileName"] = meta["originalName"]
+    payload["headCommit"] = head_commit(session_id)
     payload["history"] = history_payload(session_id)
     return payload
 
@@ -108,13 +116,58 @@ def create_session(filename: str, content: bytes) -> dict[str, object]:
     return load_payload(session_id)
 
 
-def save_session(session_id: str, updates: dict[str, object]) -> dict[str, object]:
+def save_session(session_id: str, updates: dict[str, object], viewed_commit: str) -> dict[str, object]:
+    current_head = head_commit(session_id)
+    if current_head and viewed_commit != current_head:
+        raise ValueError("Save is only allowed while viewing HEAD. Checkout the latest commit before saving.")
     document = ReqifDocument(document_path(session_id))
     document.apply_updates(updates)
     document.write()
     committed = commit_repo(repo_dir(session_id), f"Save edits {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     payload = load_payload(session_id)
     payload["committed"] = committed
+    return payload
+
+
+def object_text_at_commit(session_id: str, commit: str, object_id: str) -> dict[str, str]:
+    payload = payload_at_commit(session_id, commit)
+    objects = payload.get("objects", {})
+    if not isinstance(objects, dict):
+        raise ValueError("Could not read objects at the selected commit.")
+    selected = objects.get(object_id)
+    if not isinstance(selected, dict):
+        raise ValueError("The selected requirement does not exist at that commit.")
+    attributes = selected.get("attributes", [])
+    if not isinstance(attributes, list):
+        raise ValueError("The selected requirement has no text at that commit.")
+    text_attr = next((attr for attr in attributes if isinstance(attr, dict) and attribute_key(attr) == "reqiftext"), None)
+    if text_attr is None:
+        raise ValueError("The selected requirement has no ReqIF.Text at that commit.")
+    return {
+        "objectId": object_id,
+        "commit": commit,
+        "text": strip_markup(str(text_attr.get("value", ""))),
+    }
+
+
+def payload_at_commit(session_id: str, commit: str) -> dict[str, object]:
+    meta = session_meta(session_id)
+    document_rel = str(meta["documentRel"])
+    result = run_git(repo_dir(session_id), "show", f"{commit}:{document_rel}", check=False)
+    if result.returncode != 0:
+        raise ValueError("Could not load document at the selected commit.")
+    suffix = Path(document_rel).suffix or ".reqif"
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=suffix, delete=False) as temp:
+            temp.write(result.stdout)
+            temp_path = Path(temp.name)
+        document = ReqifDocument(temp_path)
+        payload = document.as_payload()
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+    payload["commit"] = commit
     return payload
 
 
@@ -139,4 +192,3 @@ def export_session(session_id: str) -> tuple[str, bytes, str]:
         return export_name, export_path.read_bytes(), "application/zip"
     export_name = edited_export_name(original_name, ".reqif")
     return export_name, document_path(session_id).read_bytes(), "application/xml"
-

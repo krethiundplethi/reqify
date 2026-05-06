@@ -36,6 +36,23 @@
 
       <section class="pane document-pane">
         <div class="pane-title">Document</div>
+        <div class="document-filters" aria-label="Document filters">
+          <label class="document-switch">
+            <input id="filterRequirements" type="checkbox" />
+            <span class="switch-track"></span>
+            <span>Only requirements</span>
+          </label>
+          <label class="document-switch">
+            <input id="filterEmptyVerificationCriteria" type="checkbox" />
+            <span class="switch-track"></span>
+            <span>Empty/no verification criteria</span>
+          </label>
+          <label class="document-switch" title="Show only dirty items marked with a red requirement icon">
+            <input id="filterModified" type="checkbox" />
+            <span class="switch-track"></span>
+            <span>Only modified</span>
+          </label>
+        </div>
         <div id="documentView" class="document-view empty-state">Load a ReqIF file</div>
       </section>
 
@@ -44,8 +61,10 @@
           <div class="pane-title">Attributes</div>
           <div id="attributesView" class="attributes-view empty-state">No selection</div>
         </section>
+        <div id="rightResize" class="right-resize" role="separator" aria-orientation="horizontal" aria-label="Resize Attributes and Agent panes"></div>
         <section class="pane agent-pane">
           <div class="pane-title">Agent</div>
+          <div id="agentResponse" class="agent-response"></div>
           <div class="agent-input">
             <textarea id="agentPrompt" class="agent-prompt" placeholder="Ask for analysis of the selected requirement"></textarea>
             <div class="agent-actions">
@@ -53,10 +72,20 @@
               <button id="agentApplyNext" type="button" disabled>Apply &amp; Next</button>
             </div>
           </div>
-          <div id="agentResponse" class="agent-response"></div>
+          <div id="agentPreview" class="agent-preview empty-state">No pending changes</div>
         </section>
       </aside>
     </main>
+
+    <div id="diffModal" class="modal-backdrop" hidden>
+      <section class="diff-modal" role="dialog" aria-modal="true" aria-labelledby="diffTitle">
+        <div class="diff-header">
+          <div id="diffTitle" class="diff-title">Requirement Diff</div>
+          <button id="diffClose" type="button">Close</button>
+        </div>
+        <textarea id="diffText" class="diff-text" readonly></textarea>
+      </section>
+    </div>
 
     <script src="/static/app.js"></script>
   </body>

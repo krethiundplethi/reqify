@@ -52,6 +52,8 @@ def collect_namespaces(xml_path: Path) -> None:
     try:
         for _, ns in ET.iterparse(xml_path, events=("start-ns",)):
             prefix, uri = ns
+            if re.fullmatch(r"ns\d+", prefix or ""):
+                continue
             ET.register_namespace(prefix or "", uri)
     except ET.ParseError:
         return
@@ -106,4 +108,3 @@ def replace_xhtml_value(the_value: ET.Element, fragment: str) -> None:
     for child in list(wrapper):
         wrapper.remove(child)
         the_value.append(child)
-
