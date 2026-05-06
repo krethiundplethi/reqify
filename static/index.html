@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Reqify</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">Reqify</div>
+      <label class="file-button">
+        <input id="fileInput" type="file" accept=".reqif,.reqifz,.xml" />
+        Load ReqIF
+      </label>
+      <button id="saveButton" class="primary" disabled>Save</button>
+      <button id="exportButton" disabled>Export</button>
+      <div id="status" class="status">No document</div>
+    </header>
+
+    <main class="layout">
+      <aside class="pane explorer">
+        <div class="pane-title">Structure</div>
+        <div id="tree" class="tree"></div>
+      </aside>
+
+      <section class="pane document-pane">
+        <div class="pane-title">Document</div>
+        <div id="documentView" class="document-view empty-state">Load a ReqIF file</div>
+      </section>
+
+      <aside class="right-stack">
+        <section class="pane attributes-pane">
+          <div class="pane-title">Attributes</div>
+          <div id="attributesView" class="attributes-view empty-state">No selection</div>
+        </section>
+        <section class="pane history-pane">
+          <div class="pane-title">Git History</div>
+          <div class="history-controls">
+            <button id="historyBack" title="Previous commit" disabled>‹</button>
+            <button id="historyForward" title="Next commit" disabled>›</button>
+          </div>
+          <div id="historyView" class="history-view"></div>
+        </section>
+      </aside>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
