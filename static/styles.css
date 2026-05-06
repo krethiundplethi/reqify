@@ -464,16 +464,39 @@ button.primary:not(:disabled):hover {
   resize: vertical;
 }
 
-.agent-input button {
+.agent-actions {
+  display: grid;
+  gap: 8px;
   align-self: end;
+}
+
+.agent-actions button {
+  width: 100%;
 }
 
 .agent-response {
   padding: 10px;
-  white-space: pre-wrap;
   line-height: 1.45;
   color: var(--text);
   background: #ffffff;
+}
+
+.agent-response p,
+.agent-response ul,
+.agent-response ol {
+  margin: 0 0 8px;
+}
+
+.agent-response ul,
+.agent-response ol {
+  padding-left: 20px;
+}
+
+.agent-response h3,
+.agent-response h4,
+.agent-response h5 {
+  margin: 0 0 8px;
+  font-size: 13px;
 }
 
 .history-controls {
@@ -547,7 +570,7 @@ button.primary:not(:disabled):hover {
     grid-template-columns: 1fr;
   }
 
-  .agent-input button {
+  .agent-actions {
     justify-self: start;
   }
 

@@ -8,6 +8,7 @@ const state = {
   selectedId: null,
   history: [],
   historyIndex: 0,
+  agentSuggestion: null,
   dirty: false,
 };
 
@@ -24,6 +25,7 @@ const els = {
   historyForward: document.getElementById("historyForward"),
   agentPrompt: document.getElementById("agentPrompt"),
   agentAnalyze: document.getElementById("agentAnalyze"),
+  agentApplyNext: document.getElementById("agentApplyNext"),
   agentResponse: document.getElementById("agentResponse"),
 };
 
@@ -38,6 +40,82 @@ function escapeHtml(value) {
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
+}
+
+function markdownInline(value) {
+  return escapeHtml(value)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*([^*]+)\*/g, "<em>$1</em>");
+}
+
+function markdownToXhtml(markdown) {
+  const lines = String(markdown || "").replace(/\r\n?/g, "\n").split("\n");
+  const html = [];
+  let listType = null;
+  const closeList = () => {
+    if (listType) {
+      html.push(`</${listType}>`);
+      listType = null;
+    }
+  };
+  lines.forEach((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      closeList();
+      return;
+    }
+    const heading = trimmed.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      closeList();
+      const level = heading[1].length + 2;
+      html.push(`<h${level}>${markdownInline(heading[2])}</h${level}>`);
+      return;
+    }
+    const bullet = trimmed.match(/^[-*]\s+(.+)$/);
+    if (bullet) {
+      if (listType !== "ul") {
+        closeList();
+        html.push("<ul>");
+        listType = "ul";
+      }
+      html.push(`<li>${markdownInline(bullet[1])}</li>`);
+      return;
+    }
+    const numbered = trimmed.match(/^\d+[.)]\s+(.+)$/);
+    if (numbered) {
+      if (listType !== "ol") {
+        closeList();
+        html.push("<ol>");
+        listType = "ol";
+      }
+      html.push(`<li>${markdownInline(numbered[1])}</li>`);
+      return;
+    }
+    closeList();
+    html.push(`<p>${markdownInline(trimmed)}</p>`);
+  });
+  closeList();
+  return html.join("");
+}
+
+function sanitizeXhtmlFragment(value) {
+  const template = document.createElement("template");
+  template.innerHTML = String(value || "");
+  const allowedTags = new Set(["B", "BR", "CODE", "DIV", "EM", "I", "LI", "OL", "P", "STRONG", "U", "UL"]);
+  const clean = (node) => {
+    [...node.childNodes].forEach((child) => {
+      if (child.nodeType === Node.TEXT_NODE) return;
+      if (child.nodeType !== Node.ELEMENT_NODE || !allowedTags.has(child.tagName)) {
+        child.replaceWith(document.createTextNode(child.textContent || ""));
+        return;
+      }
+      [...child.attributes].forEach((attr) => child.removeAttribute(attr.name));
+      clean(child);
+    });
+  };
+  clean(template.content);
+  return template.innerHTML;
 }
 
 function plainText(value) {
@@ -55,12 +133,14 @@ function ingest(payload) {
   state.outlineNumbers = payload.outlineNumbers || {};
   state.history = payload.history || [];
   state.historyIndex = 0;
+  state.agentSuggestion = null;
   state.selectedId = state.selectedId && state.objects[state.selectedId] ? state.selectedId : state.documentOrder[0] || null;
   state.dirty = false;
   render();
   setStatus(state.fileName || "Loaded");
   els.saveButton.disabled = false;
   els.exportButton.disabled = false;
+  updateAgentApplyState();
 }
 
 async function apiJson(url, options = {}) {
@@ -116,6 +196,15 @@ function objectKind(object) {
   return "requirement";
 }
 
+function agentEditsForSelection() {
+  if (!state.agentSuggestion || !state.selectedId) return [];
+  return state.agentSuggestion.edits.filter((edit) => !edit.objectId || edit.objectId === state.selectedId);
+}
+
+function updateAgentApplyState() {
+  els.agentApplyNext.disabled = !agentEditsForSelection().length;
+}
+
 function updateAttribute(objectId, attrId, value) {
   const attr = getAttribute(objectId, attrId);
   if (!attr || attr.value === value) return;
@@ -146,6 +235,7 @@ function selectObject(objectId) {
   state.selectedId = objectId;
   renderTree();
   renderAttributes();
+  updateAgentApplyState();
   document.querySelectorAll(".document-item").forEach((node) => {
     node.classList.toggle("active", node.dataset.objectId === objectId);
   });
@@ -157,6 +247,7 @@ function render() {
   renderDocument();
   renderAttributes();
   renderHistory();
+  updateAgentApplyState();
 }
 
 function renderTree() {
@@ -557,6 +648,8 @@ els.exportButton.addEventListener("click", () => {
 
 async function analyzeWithAgent() {
   const prompt = els.agentPrompt.value.trim();
+  state.agentSuggestion = null;
+  updateAgentApplyState();
   els.agentAnalyze.disabled = true;
   els.agentResponse.className = "agent-response";
   els.agentResponse.textContent = "";
@@ -570,9 +663,16 @@ async function analyzeWithAgent() {
         objectId: state.selectedId,
       }),
     });
-    const response = String(payload.response || "").trim();
-    if (!response) throw new Error("The LLM backend returned an empty response.");
-    els.agentResponse.textContent = response;
+    const markdown = String(payload.markdown || payload.response || "").trim();
+    const edits = Array.isArray(payload.edits) ? payload.edits.filter(isAgentEdit) : [];
+    if (!markdown) throw new Error("The LLM backend returned an empty response.");
+    state.agentSuggestion = {
+      objectId: state.selectedId,
+      markdown,
+      edits,
+    };
+    els.agentResponse.innerHTML = markdownToXhtml(markdown);
+    updateAgentApplyState();
   } catch (error) {
     els.agentResponse.textContent = error.message;
   } finally {
@@ -580,6 +680,89 @@ async function analyzeWithAgent() {
   }
 }
 
+function isAgentEdit(edit) {
+  return (
+    edit &&
+    typeof edit === "object" &&
+    typeof edit.objectId === "string" &&
+    typeof edit.attributeId === "string" &&
+    typeof edit.attributeName === "string" &&
+    (typeof edit.valueMarkdown === "string" || typeof edit.valueXhtml === "string")
+  );
+}
+
+function applyAgentSuggestionAndNext() {
+  const object = state.objects[state.selectedId];
+  if (!object) return;
+  const edits = agentEditsForSelection();
+  if (!edits.length) return;
+  let applied = 0;
+  edits.forEach((edit) => {
+    const attr = findEditableAttribute(object, edit);
+    if (!attr) return;
+    const nextValue = agentEditValueForAttribute(attr, edit);
+    if (!nextValue) return;
+    updateAttribute(object.id, attr.id, nextValue);
+    syncEditors(object.id, attr.id, nextValue, null);
+    applied += 1;
+  });
+  if (!applied) {
+    els.agentResponse.textContent = "The agent response did not identify an editable field on the selected requirement.";
+    return;
+  }
+  state.agentSuggestion = null;
+  updateAgentApplyState();
+  setStatus(`${state.fileName} • unsaved`, true);
+  renderDocument();
+  selectNextRequirement(object.id);
+}
+
+function findEditableAttribute(object, edit) {
+  const byId = object.attributes.find((attr) => attr.editable && edit.attributeId && attr.id === edit.attributeId);
+  if (byId) return byId;
+  const targetName = String(edit.attributeName || "").toLowerCase();
+  return object.attributes.find((attr) => attr.editable && String(attr.name || "").toLowerCase() === targetName);
+}
+
+function agentEditValueForAttribute(attr, edit) {
+  if (attr.type === "xhtml") {
+    if (edit.valueMarkdown) return markdownToXhtml(edit.valueMarkdown);
+    return sanitizeXhtmlFragment(edit.valueXhtml);
+  }
+  if (attr.type === "enumeration") return attr.value;
+  return plainText(markdownToXhtml(edit.valueMarkdown || edit.valueXhtml));
+}
+
+function selectNextRequirement(currentObjectId) {
+  const start = state.documentOrder.indexOf(currentObjectId);
+  const ordered = start >= 0 ? state.documentOrder.slice(start + 1) : state.documentOrder;
+  const nextId = ordered.find((objectId) => {
+    const object = state.objects[objectId];
+    return object && objectKind(object) === "requirement" && reqifTextAttr(object);
+  });
+  if (!nextId) return;
+  selectObject(nextId);
+  focusDocumentEditor(nextId);
+}
+
+function focusDocumentEditor(objectId) {
+  requestAnimationFrame(() => {
+    const selector = `.document-item[data-object-id="${CSS.escape(objectId)}"] [data-origin="document text"]`;
+    const editor = document.querySelector(selector);
+    if (!editor) return;
+    editor.focus();
+    if (editor.classList.contains("xhtml-editor")) {
+      const range = document.createRange();
+      range.selectNodeContents(editor);
+      range.collapse(false);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+  });
+}
+
 els.agentAnalyze.addEventListener("click", analyzeWithAgent);
+els.agentApplyNext.addEventListener("click", applyAgentSuggestionAndNext);
 els.historyBack.addEventListener("click", () => checkoutHistory(state.historyIndex + 1));
 els.historyForward.addEventListener("click", () => checkoutHistory(state.historyIndex - 1));

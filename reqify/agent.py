@@ -13,13 +13,56 @@ from urllib.request import Request as UrlRequest
 from urllib.request import urlopen
 
 
-DEFAULT_AGENT_PROMPT = """As an automotive requirments engineer, analyze this requirement statement and return as bullet points:
-- Rating 1-5 and one sentece what to improve.
-- Verification Hint: One sentece what to improve.
+DEFAULT_AGENT_PROMPT = """As an automotive requirments engineer, analyze this requirement statement.
+Return concise, human-readable markdown and machine-readable suggested edits.
 
 Guidance:
 - "well_formed" considers clarity, singularity, unambiguity, measurable criteria, absence of design constraint unless intended.
 """
+
+AGENT_RESPONSE_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "markdown": {
+            "type": "string",
+            "description": "Human-readable markdown analysis and short rationale for the proposed changes.",
+        },
+        "edits": {
+            "type": "array",
+            "description": "Machine-readable field edits that can be applied to the selected ReqIF object.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "objectId": {"type": "string"},
+                    "attributeId": {"type": "string"},
+                    "attributeName": {"type": "string"},
+                    "valueMarkdown": {"type": "string"},
+                    "valueXhtml": {"type": "string"},
+                },
+                "required": ["objectId", "attributeId", "attributeName", "valueMarkdown", "valueXhtml"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["markdown", "edits"],
+    "additionalProperties": False,
+}
+
+STRUCTURED_RESPONSE_INSTRUCTIONS = """Return only JSON matching this schema:
+{
+  "markdown": "Human-readable markdown analysis. Include rating and verification hint.",
+  "edits": [
+    {
+      "objectId": "selected ReqIF object id",
+      "attributeId": "exact attribute id from the selected item context",
+      "attributeName": "exact attribute name from the selected item context",
+      "valueMarkdown": "complete replacement value in markdown",
+      "valueXhtml": "complete replacement value as XHTML fragment"
+    }
+  ]
+}
+
+Use edits only for fields where you propose a concrete replacement. Preserve the full intended field value, not a diff."""
 
 
 @dataclass(frozen=True)
@@ -63,6 +106,14 @@ class OpenAIResponsesBackend:
                 }
             ],
             "max_output_tokens": int_env("REQIFY_AGENT_MAX_OUTPUT_TOKENS", 1200),
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "reqify_agent_response",
+                    "strict": True,
+                    "schema": AGENT_RESPONSE_SCHEMA,
+                }
+            },
         }
         temperature = optional_float_env("REQIFY_AGENT_TEMPERATURE")
         if temperature is not None:
@@ -136,6 +187,10 @@ def default_prompt() -> str:
     return os.environ.get("REQIFY_AGENT_PROMPT", DEFAULT_AGENT_PROMPT)
 
 
+def agent_instructions() -> str:
+    return f"{default_prompt().strip()}\n\n{STRUCTURED_RESPONSE_INSTRUCTIONS}"
+
+
 def backend_from_config() -> AgentBackend:
     backend_name = os.environ.get("REQIFY_AGENT_BACKEND", "local").strip().lower()
     if backend_name == "local":
@@ -147,12 +202,17 @@ def backend_from_config() -> AgentBackend:
     return UnconfiguredAgentBackend(backend_name)
 
 
-def analyze_agent(request: AgentRequest) -> dict[str, str]:
+def analyze_agent(request: AgentRequest) -> dict[str, object]:
     backend = backend_from_config()
-    response = backend.analyze(default_prompt(), request).strip()
+    response = backend.analyze(agent_instructions(), request).strip()
     if not response:
         raise AgentBackendError("The LLM backend returned an empty response.")
-    return {"response": response}
+    structured = parse_agent_response(response)
+    return {
+        "response": structured["markdown"],
+        "markdown": structured["markdown"],
+        "edits": structured["edits"],
+    }
 
 
 def compose_user_input(request: AgentRequest) -> str:
@@ -167,6 +227,9 @@ def summarize_object(selected_object: dict[str, object] | None) -> str:
     if not selected_object:
         return ""
     lines = [f"Object: {selected_object.get('id', '')}"]
+    type_name = selected_object.get("objectTypeName")
+    if type_name:
+        lines.append(f"Object type: {type_name}")
     title = selected_object.get("title")
     if title:
         lines.append(f"Title: {title}")
@@ -175,14 +238,63 @@ def summarize_object(selected_object: dict[str, object] | None) -> str:
         for attribute in attributes:
             if not isinstance(attribute, dict):
                 continue
-            name = str(attribute.get("name") or attribute.get("id") or "Attribute")
+            attr_id = str(attribute.get("id") or "")
+            name = str(attribute.get("name") or attr_id or "Attribute")
             value = attribute.get("displayValue", attribute.get("value", ""))
             if isinstance(value, list):
                 value = ", ".join(str(item) for item in value)
             text = str(value).strip()
             if text:
-                lines.append(f"{name}: {text[:700]}")
+                lines.append(f"Attribute id={attr_id} name={name}: {text[:700]}")
     return "\n".join(lines)
+
+
+def parse_agent_response(response: str) -> dict[str, object]:
+    payload_text = response.strip()
+    if payload_text.startswith("```"):
+        payload_text = strip_code_fence(payload_text)
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError as exc:
+        raise AgentBackendError("The LLM backend did not return machine-readable JSON suggestions.") from exc
+    if not isinstance(payload, dict):
+        raise AgentBackendError("The LLM backend returned an unexpected suggestion shape.")
+    markdown = payload.get("markdown")
+    edits = payload.get("edits")
+    if not isinstance(markdown, str) or not markdown.strip():
+        raise AgentBackendError("The LLM backend response is missing human-readable markdown.")
+    if not isinstance(edits, list):
+        raise AgentBackendError("The LLM backend response is missing machine-readable edits.")
+    clean_edits: list[dict[str, str]] = []
+    for edit in edits:
+        if not isinstance(edit, dict):
+            raise AgentBackendError("The LLM backend returned an invalid edit entry.")
+        object_id = str(edit.get("objectId", "")).strip()
+        attribute_id = str(edit.get("attributeId", "")).strip()
+        attribute_name = str(edit.get("attributeName", "")).strip()
+        value_markdown = str(edit.get("valueMarkdown", "")).strip()
+        value_xhtml = str(edit.get("valueXhtml", "")).strip()
+        if not (object_id and (attribute_id or attribute_name) and (value_markdown or value_xhtml)):
+            raise AgentBackendError("The LLM backend returned an incomplete edit entry.")
+        clean_edits.append(
+            {
+                "objectId": object_id,
+                "attributeId": attribute_id,
+                "attributeName": attribute_name,
+                "valueMarkdown": value_markdown,
+                "valueXhtml": value_xhtml,
+            }
+        )
+    return {"markdown": markdown.strip(), "edits": clean_edits}
+
+
+def strip_code_fence(text: str) -> str:
+    lines = text.splitlines()
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].startswith("```"):
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
 
 
 def env_first(*names: str) -> str:

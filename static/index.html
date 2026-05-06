@@ -48,7 +48,10 @@
           <div class="pane-title">Agent</div>
           <div class="agent-input">
             <textarea id="agentPrompt" class="agent-prompt" placeholder="Ask for analysis of the selected requirement"></textarea>
-            <button id="agentAnalyze" class="primary" type="button">Analyze</button>
+            <div class="agent-actions">
+              <button id="agentAnalyze" class="primary" type="button">Analyze</button>
+              <button id="agentApplyNext" type="button" disabled>Apply &amp; Next</button>
+            </div>
           </div>
           <div id="agentResponse" class="agent-response"></div>
         </section>
