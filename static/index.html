@@ -19,9 +19,19 @@
     </header>
 
     <main class="layout">
-      <aside class="pane explorer">
-        <div class="pane-title">Structure</div>
-        <div id="tree" class="tree"></div>
+      <aside class="left-stack">
+        <section class="pane explorer">
+          <div class="pane-title">Structure</div>
+          <div id="tree" class="tree"></div>
+        </section>
+        <section class="pane history-pane">
+          <div class="pane-title">Git History</div>
+          <div class="history-controls">
+            <button id="historyBack" title="Previous commit" disabled>‹</button>
+            <button id="historyForward" title="Next commit" disabled>›</button>
+          </div>
+          <div id="historyView" class="history-view"></div>
+        </section>
       </aside>
 
       <section class="pane document-pane">
@@ -34,13 +44,13 @@
           <div class="pane-title">Attributes</div>
           <div id="attributesView" class="attributes-view empty-state">No selection</div>
         </section>
-        <section class="pane history-pane">
-          <div class="pane-title">Git History</div>
-          <div class="history-controls">
-            <button id="historyBack" title="Previous commit" disabled>‹</button>
-            <button id="historyForward" title="Next commit" disabled>›</button>
+        <section class="pane agent-pane">
+          <div class="pane-title">Agent</div>
+          <div class="agent-input">
+            <textarea id="agentPrompt" class="agent-prompt" placeholder="Ask for analysis of the selected requirement"></textarea>
+            <button id="agentAnalyze" class="primary" type="button">Analyze</button>
           </div>
-          <div id="historyView" class="history-view"></div>
+          <div id="agentResponse" class="agent-response"></div>
         </section>
       </aside>
     </main>

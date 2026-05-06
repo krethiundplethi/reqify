@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 from xml.etree import ElementTree as ET
 
+from .agent import AgentBackendError, AgentRequest, analyze_agent
 from .config import STATIC_DIR, ensure_dirs
 from .git_repo import run_git
 from .http_utils import json_bytes, parse_multipart
@@ -102,6 +103,29 @@ class ReqifyHandler(BaseHTTPRequestHandler):
                     self.send_error_json(HTTPStatus.BAD_REQUEST, "Invalid save payload")
                     return
                 self.send_json(save_session(session_id, updates))
+            elif path == "/api/agent/analyze":
+                payload = json.loads(self.read_body().decode("utf-8"))
+                session_id = payload.get("sessionId")
+                object_id = payload.get("objectId")
+                selected_object = None
+                if isinstance(session_id, str) and isinstance(object_id, str):
+                    document_payload = load_payload(session_id)
+                    objects = document_payload.get("objects", {})
+                    if isinstance(objects, dict):
+                        selected_object = objects.get(object_id)
+                try:
+                    self.send_json(
+                        analyze_agent(
+                            AgentRequest(
+                                user_prompt=str(payload.get("prompt", "")),
+                                session_id=session_id if isinstance(session_id, str) else None,
+                                object_id=object_id if isinstance(object_id, str) else None,
+                                selected_object=selected_object if isinstance(selected_object, dict) else None,
+                            )
+                        )
+                    )
+                except AgentBackendError as exc:
+                    self.send_error_json(HTTPStatus.SERVICE_UNAVAILABLE, str(exc))
             elif path.startswith("/api/session/") and path.endswith("/checkout"):
                 session_id = path.split("/")[3]
                 payload = json.loads(self.read_body().decode("utf-8"))

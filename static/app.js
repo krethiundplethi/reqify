@@ -22,6 +22,9 @@ const els = {
   historyView: document.getElementById("historyView"),
   historyBack: document.getElementById("historyBack"),
   historyForward: document.getElementById("historyForward"),
+  agentPrompt: document.getElementById("agentPrompt"),
+  agentAnalyze: document.getElementById("agentAnalyze"),
+  agentResponse: document.getElementById("agentResponse"),
 };
 
 function setStatus(text, dirty = state.dirty) {
@@ -98,6 +101,19 @@ function chapterNameAttr(object) {
 
 function reqifTextAttr(object) {
   return object.attributes.find(isReqifText);
+}
+
+function objectKind(object) {
+  const typeValues = [object.objectTypeName, object.objectTypeId];
+  object.attributes.forEach((attr) => {
+    const key = attrKey(attr);
+    if (key.includes("type") || key.includes("category") || key.includes("kind") || key.includes("classification")) {
+      typeValues.push(attr.displayValue, attr.value, attr.name, attr.id);
+    }
+  });
+  const text = typeValues.flat().map((value) => String(value || "").toLowerCase()).join(" ");
+  if (/\binfo(?:rmation|rmational)?\b/.test(text)) return "info";
+  return "requirement";
 }
 
 function updateAttribute(objectId, attrId, value) {
@@ -224,8 +240,15 @@ function renderChapterHeading(objectId, attr) {
 }
 
 function renderDocumentText(objectId, attr) {
+  const object = state.objects[objectId];
+  const kind = objectKind(object);
   const body = document.createElement("section");
-  body.className = "document-text";
+  body.className = `document-text ${kind === "info" ? "info-item" : "requirement-item"}`;
+  const icon = document.createElement("div");
+  icon.className = "document-kind-icon";
+  icon.title = kind === "info" ? "Information" : "Requirement";
+  icon.textContent = kind === "info" ? "I" : "R";
+  body.appendChild(icon);
   if (attr.type === "xhtml") {
     body.appendChild(renderXhtmlEditor(objectId, attr, "document text"));
   } else {
@@ -405,6 +428,18 @@ function renderXhtmlEditor(objectId, attr, origin) {
   editor.dataset.attrId = attr.id;
   editor.dataset.origin = origin;
   editor.innerHTML = attr.value || "";
+  const showToolbar = () => {
+    shell.classList.add("editing");
+  };
+  const hideToolbar = () => {
+    requestAnimationFrame(() => {
+      if (!shell.contains(document.activeElement)) {
+        shell.classList.remove("editing");
+      }
+    });
+  };
+  editor.addEventListener("focus", showToolbar);
+  editor.addEventListener("blur", hideToolbar);
   editor.addEventListener("input", () => {
     updateAttribute(objectId, attr.id, editor.innerHTML);
     syncEditors(objectId, attr.id, editor.innerHTML, editor);
@@ -520,5 +555,31 @@ els.exportButton.addEventListener("click", () => {
   window.location.href = `/api/session/${state.sessionId}/export`;
 });
 
+async function analyzeWithAgent() {
+  const prompt = els.agentPrompt.value.trim();
+  els.agentAnalyze.disabled = true;
+  els.agentResponse.className = "agent-response";
+  els.agentResponse.textContent = "";
+  try {
+    const payload = await apiJson("/api/agent/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt,
+        sessionId: state.sessionId,
+        objectId: state.selectedId,
+      }),
+    });
+    const response = String(payload.response || "").trim();
+    if (!response) throw new Error("The LLM backend returned an empty response.");
+    els.agentResponse.textContent = response;
+  } catch (error) {
+    els.agentResponse.textContent = error.message;
+  } finally {
+    els.agentAnalyze.disabled = false;
+  }
+}
+
+els.agentAnalyze.addEventListener("click", analyzeWithAgent);
 els.historyBack.addEventListener("click", () => checkoutHistory(state.historyIndex + 1));
 els.historyForward.addEventListener("click", () => checkoutHistory(state.historyIndex - 1));

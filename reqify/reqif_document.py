@@ -30,6 +30,7 @@ class ReqifDocument:
         self.enum_options_by_datatype = self._enum_options_by_datatype()
         self.attribute_defs = self._attribute_definitions()
         self.definition_names = self._definition_names()
+        self.spec_object_type_names = self._spec_object_type_names()
         self.spec_objects = self._spec_objects()
 
     def _definition_names(self) -> dict[str, str]:
@@ -39,6 +40,16 @@ class ReqifDocument:
                 identifier = element.get("IDENTIFIER")
                 if identifier:
                     names[identifier] = element.get("LONG-NAME") or element.get("DESC") or identifier
+        return names
+
+    def _spec_object_type_names(self) -> dict[str, str]:
+        names: dict[str, str] = {}
+        for element in self.root.iter():
+            if local_name(element.tag) != "SPEC-OBJECT-TYPE":
+                continue
+            identifier = element.get("IDENTIFIER")
+            if identifier:
+                names[identifier] = element.get("LONG-NAME") or element.get("DESC") or identifier
         return names
 
     def _enum_options_by_datatype(self) -> dict[str, list[dict[str, str]]]:
@@ -94,6 +105,13 @@ class ReqifDocument:
                 if identifier:
                     objects[identifier] = element
         return objects
+
+    def _spec_object_type_ref(self, spec_object: ET.Element) -> str:
+        type_container = direct_container(spec_object, "TYPE")
+        if type_container is None:
+            return ""
+        type_ref = descendant_text(type_container, "SPEC-OBJECT-TYPE-REF")
+        return type_ref.strip() if type_ref else ""
 
     def _attribute_ref(self, value_element: ET.Element) -> str:
         for child in list(value_element):
@@ -253,9 +271,12 @@ class ReqifDocument:
         objects: dict[str, dict[str, object]] = {}
         for object_id, spec_object in self.spec_objects.items():
             attributes = self._object_attributes(spec_object)
+            type_id = self._spec_object_type_ref(spec_object)
             objects[object_id] = {
                 "id": object_id,
                 "title": self._title_for(object_id, attributes),
+                "objectTypeId": type_id,
+                "objectTypeName": self.spec_object_type_names.get(type_id, type_id),
                 "attributes": attributes,
             }
         specs = self._specifications()
@@ -322,4 +343,3 @@ class ReqifDocument:
 
     def write(self) -> None:
         self.tree.write(self.xml_path, encoding="utf-8", xml_declaration=True, short_empty_elements=True)
-
