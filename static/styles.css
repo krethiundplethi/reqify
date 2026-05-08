@@ -190,6 +190,16 @@ body.resizing {
   cursor: pointer;
 }
 
+.document-filter-count {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .document-switch input {
   position: absolute;
   opacity: 0;

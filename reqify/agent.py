@@ -23,9 +23,9 @@ Return only terse findings, one quality rating, verification criteria, and concr
 
 Guidance:
 - "well_formed" considers clarity, singularity, unambiguity, measurable criteria, absence of design constraint unless intended.
-- Analyze and improve both the requirement text and Verification Criteria when those fields exist.
+- Analyze and improve both the requirement text and Verification Criteria.
 - If Verification Criteria are missing or weak, include a concrete edit for the exact verification criteria attribute from context.
-- The Verification Criteria suggestion should be as concise as possible.
+- Minimalistic edits.
 """
 
 AGENT_RESPONSE_SCHEMA: dict[str, object] = {
@@ -70,7 +70,13 @@ STRUCTURED_RESPONSE_INSTRUCTIONS = """Return only JSON matching this schema:
   ]
 }
 
-Keep markdown short. Use exactly one quality rating: high, medium, or low. Do not use numeric scores, letter grades, well_formed, or multiple ratings. No positive feedback, no risk section, no discussion. Include edits for requirement text and Verification Criteria when either needs improvement and the field exists. Keep Verification Criteria suggestions as concise as possible. Use edits only for fields where you propose a concrete replacement. Preserve the full intended field value, not a diff."""
+Keep markdown short.
+Use exactly one quality rating: high, medium, or low.
+Do not use numeric scores, letter grades, well_formed, or multiple ratings.
+No positive feedback, no risk section, no discussion.
+Include edits for requirement text and Verification Criteria when either needs improvement and the field exists. 
+Use edits only for fields where you propose a concrete replacement.
+Preserve the full intended field value, not a diff."""
 
 
 @dataclass(frozen=True)
@@ -103,7 +109,7 @@ class OpenAIResponsesBackend:
         if not api_key:
             raise AgentBackendError("OpenAI API key is missing. Set OPENAI_API_KEY or REQIFY_OPENAI_API_KEY.")
         base_url = os.environ.get("REQIFY_OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-        model = os.environ.get("REQIFY_OPENAI_MODEL", "gpt-5.2").strip()
+        model = os.environ.get("REQIFY_OPENAI_MODEL", "gpt-5.4").strip()
         user_input = compose_user_input(request)
         payload: dict[str, object] = {
             "model": model,

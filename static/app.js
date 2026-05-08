@@ -30,6 +30,7 @@ const els = {
   status: document.getElementById("status"),
   tree: document.getElementById("tree"),
   documentView: document.getElementById("documentView"),
+  documentFilterCount: document.getElementById("documentFilterCount"),
   filterModified: document.getElementById("filterModified"),
   filterRequirements: document.getElementById("filterRequirements"),
   filterEmptyVerificationCriteria: document.getElementById("filterEmptyVerificationCriteria"),
@@ -237,6 +238,14 @@ function ingest(payload) {
   state.localModifiedObjectIds = new Set();
   state.comparisonModifiedObjectIds = new Set();
   state.selectedHistoryObjects = null;
+  if (uiState.documentFilters && typeof uiState.documentFilters === "object") {
+    state.documentFilters.modified = Boolean(uiState.documentFilters.modified);
+    state.documentFilters.requirements = Boolean(uiState.documentFilters.requirements);
+    state.documentFilters.emptyVerificationCriteria = Boolean(uiState.documentFilters.emptyVerificationCriteria);
+  }
+  els.filterModified.checked = state.documentFilters.modified;
+  els.filterRequirements.checked = state.documentFilters.requirements;
+  els.filterEmptyVerificationCriteria.checked = state.documentFilters.emptyVerificationCriteria;
   state.selectedId = uiState.selectedId && state.objects[uiState.selectedId] ? uiState.selectedId : state.selectedId && state.objects[state.selectedId] ? state.selectedId : state.documentOrder[0] || null;
   state.editorCursor = uiState.cursor && typeof uiState.cursor === "object" ? uiState.cursor : null;
   if (typeof uiState.agentPrompt === "string") {
@@ -256,6 +265,7 @@ function captureUiState() {
   return {
     selectedId: state.selectedId || "",
     agentPrompt: els.agentPrompt.value,
+    documentFilters: { ...state.documentFilters },
     cursor: state.editorCursor,
   };
 }
@@ -593,6 +603,17 @@ function shouldShowDocumentObject(objectId) {
   return true;
 }
 
+function documentFilterCounts() {
+  const total = state.documentOrder.filter((objectId) => reqifTextAttr(state.objects[objectId])).length;
+  const shown = state.documentOrder.filter(shouldShowDocumentObject).length;
+  return { shown, total };
+}
+
+function renderDocumentFilterCount() {
+  const { shown, total } = documentFilterCounts();
+  els.documentFilterCount.textContent = `Showing ${shown} filtered of ${total} items`;
+}
+
 function outlineLevel(objectId) {
   const number = String(state.outlineNumbers[objectId] || "");
   if (!number) return 0;
@@ -617,6 +638,7 @@ function chapterHasVisibleContent(index) {
 function renderDocument() {
   els.documentView.innerHTML = "";
   els.documentView.className = "document-view";
+  renderDocumentFilterCount();
   if (!state.documentOrder.length) {
     els.documentView.className = "document-view empty-state";
     els.documentView.textContent = "No content";
@@ -1452,6 +1474,11 @@ els.agentApplyNext.addEventListener("click", applyAgentSuggestionAndNext);
 bindDocumentFilter(els.filterModified, "modified");
 bindDocumentFilter(els.filterRequirements, "requirements");
 bindDocumentFilter(els.filterEmptyVerificationCriteria, "emptyVerificationCriteria");
+window.addEventListener("beforeunload", (event) => {
+  if (!state.dirty) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
 els.rightResize.addEventListener("pointerdown", (event) => {
   event.preventDefault();
   els.rightResize.setPointerCapture(event.pointerId);
