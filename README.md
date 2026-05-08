@@ -10,6 +10,12 @@ python3 reqify_server.py
 
 Open `http://127.0.0.1:8080`.
 
+To print the LLM system and user prompts in the server terminal, run:
+
+```bash
+python3 reqify_server.py --debug
+```
+
 ## Current scope
 
 - Upload `.reqif`, `.xml`, and `.reqifz` files.

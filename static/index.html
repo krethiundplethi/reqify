@@ -64,14 +64,15 @@
         <div id="rightResize" class="right-resize" role="separator" aria-orientation="horizontal" aria-label="Resize Attributes and Agent panes"></div>
         <section class="pane agent-pane">
           <div class="pane-title">Agent</div>
-          <div id="agentResponse" class="agent-response"></div>
           <div class="agent-input">
             <textarea id="agentPrompt" class="agent-prompt" placeholder="Ask for analysis of the selected requirement"></textarea>
             <div class="agent-actions">
               <button id="agentAnalyze" class="primary" type="button">Analyze</button>
+              <button id="agentApply" type="button" disabled>Apply</button>
               <button id="agentApplyNext" type="button" disabled>Apply &amp; Next</button>
             </div>
           </div>
+          <div id="agentResponse" class="agent-response"></div>
           <div id="agentPreview" class="agent-preview empty-state">No pending changes</div>
         </section>
       </aside>

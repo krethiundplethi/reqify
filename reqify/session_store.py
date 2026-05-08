@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import re
+import subprocess
 import tempfile
 import uuid
 import zipfile
@@ -15,13 +17,42 @@ from .reqif_document import ReqifDocument
 from .xml_utils import attribute_key, strip_markup
 
 
+UI_STATE_REL = ".reqify-state.json"
+
+
 def safe_extract(zip_file: zipfile.ZipFile, target: Path) -> None:
+    validate_archive_members(zip_file, target)
+    zip_file.extractall(target)
+
+
+def validate_archive_members(zip_file: zipfile.ZipFile, target: Path) -> None:
     target_resolved = target.resolve()
     for info in zip_file.infolist():
         destination = (target / info.filename).resolve()
-        if not str(destination).startswith(str(target_resolved)):
+        if destination != target_resolved and target_resolved not in destination.parents:
             raise ValueError(f"Unsafe archive member: {info.filename}")
-    zip_file.extractall(target)
+
+
+def uploaded_document_bytes(original_name: str, content: bytes) -> bytes:
+    is_zip = original_name.lower().endswith(".reqifz") or zipfile.is_zipfile(io.BytesIO(content))
+    if not is_zip:
+        return content
+    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+        validate_archive_members(archive, Path(tempfile.gettempdir()) / "reqify-upload-fingerprint")
+        candidates = sorted(
+            [
+                info.filename
+                for info in archive.infolist()
+                if not info.is_dir() and Path(info.filename).suffix.lower() in {".reqif", ".xml"}
+            ]
+        )
+        if not candidates:
+            raise ValueError("The archive does not contain a .reqif or .xml document")
+        return archive.read(candidates[0])
+
+
+def source_sha256(original_name: str, content: bytes) -> str:
+    return hashlib.sha256(uploaded_document_bytes(original_name, content)).hexdigest()
 
 
 def session_dir(session_id: str) -> Path:
@@ -48,6 +79,10 @@ def document_path(session_id: str) -> Path:
     return repo_dir(session_id) / str(meta["documentRel"])
 
 
+def ui_state_path(session_id: str) -> Path:
+    return repo_dir(session_id) / UI_STATE_REL
+
+
 def head_commit(session_id: str) -> str:
     result = run_git(repo_dir(session_id), "rev-parse", "HEAD", check=False)
     return result.stdout.strip() if result.returncode == 0 else ""
@@ -61,7 +96,24 @@ def load_payload(session_id: str) -> dict[str, object]:
     payload["fileName"] = meta["originalName"]
     payload["headCommit"] = head_commit(session_id)
     payload["history"] = history_payload(session_id)
+    payload["uiState"] = load_ui_state(session_id)
     return payload
+
+
+def load_ui_state(session_id: str) -> dict[str, object]:
+    path = ui_state_path(session_id)
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def write_ui_state(session_id: str, ui_state: object) -> None:
+    state = ui_state if isinstance(ui_state, dict) else {}
+    ui_state_path(session_id).write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
 def history_payload(session_id: str) -> list[dict[str, str]]:
@@ -82,13 +134,63 @@ def history_payload(session_id: str) -> list[dict[str, str]]:
     return history
 
 
+def existing_session_for_source(source_hash: str) -> str | None:
+    if not DATA_DIR.exists():
+        return None
+    matches: list[tuple[str, str]] = []
+    for meta_path in DATA_DIR.glob("*/session.json"):
+        session_id = meta_path.parent.name
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            meta_hash = str(meta.get("sourceSha256") or "")
+            if not meta_hash:
+                meta_hash = legacy_source_sha256(session_id, meta)
+                if meta_hash:
+                    meta["sourceSha256"] = meta_hash
+                    write_session_meta(session_id, meta)
+            if meta_hash == source_hash:
+                matches.append((str(meta.get("createdAt") or ""), session_id))
+        except Exception:
+            continue
+    if not matches:
+        return None
+    return sorted(matches)[-1][1]
+
+
+def legacy_source_sha256(session_id: str, meta: dict[str, object]) -> str:
+    repo = repo_dir(session_id)
+    document_rel = str(meta.get("documentRel") or "")
+    if not document_rel:
+        return ""
+    root = run_git(repo, "rev-list", "--max-parents=0", "HEAD", check=False)
+    if root.returncode != 0 or not root.stdout.strip():
+        return ""
+    first_commit = root.stdout.splitlines()[0].strip()
+    document = subprocess.run(
+        ["git", "show", f"{first_commit}:{document_rel}"],
+        cwd=repo,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if document.returncode != 0:
+        return ""
+    return hashlib.sha256(document.stdout).hexdigest()
+
+
 def create_session(filename: str, content: bytes) -> dict[str, object]:
     ensure_dirs()
+    original_name = safe_name(filename)
+    source_hash = source_sha256(original_name, content)
+    existing_session_id = existing_session_for_source(source_hash)
+    if existing_session_id:
+        payload = load_payload(existing_session_id)
+        payload["reusedSession"] = True
+        return payload
     session_id = uuid.uuid4().hex
     sdir = session_dir(session_id)
     repo = repo_dir(session_id)
     repo.mkdir(parents=True)
-    original_name = safe_name(filename)
     is_zip = original_name.lower().endswith(".reqifz") or zipfile.is_zipfile(io.BytesIO(content))
     if is_zip:
         archive_path = sdir / original_name
@@ -109,20 +211,24 @@ def create_session(filename: str, content: bytes) -> dict[str, object]:
         "originalName": original_name,
         "isZip": is_zip,
         "documentRel": document_rel,
+        "sourceSha256": source_hash,
         "createdAt": datetime.now(timezone.utc).isoformat(),
     }
     write_session_meta(session_id, meta)
+    write_ui_state(session_id, {})
     commit_repo(repo, "Import original ReqIF")
     return load_payload(session_id)
 
 
-def save_session(session_id: str, updates: dict[str, object], viewed_commit: str) -> dict[str, object]:
+def save_session(session_id: str, updates: dict[str, object], viewed_commit: str, ui_state: object | None = None) -> dict[str, object]:
     current_head = head_commit(session_id)
     if current_head and viewed_commit != current_head:
         raise ValueError("Save is only allowed while viewing HEAD. Checkout the latest commit before saving.")
     document = ReqifDocument(document_path(session_id))
     document.apply_updates(updates)
     document.write()
+    if ui_state is not None:
+        write_ui_state(session_id, ui_state)
     committed = commit_repo(repo_dir(session_id), f"Save edits {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     payload = load_payload(session_id)
     payload["committed"] = committed
@@ -187,7 +293,7 @@ def export_session(session_id: str) -> tuple[str, bytes, str]:
         export_path = session_dir(session_id) / export_name
         with zipfile.ZipFile(export_path, "w", zipfile.ZIP_DEFLATED) as archive:
             for path in repo.rglob("*"):
-                if path.is_file() and ".git" not in path.parts:
+                if path.is_file() and ".git" not in path.parts and path.relative_to(repo).as_posix() != UI_STATE_REL:
                     archive.write(path, path.relative_to(repo))
         return export_name, export_path.read_bytes(), "application/zip"
     export_name = edited_export_name(original_name, ".reqif")

@@ -5,12 +5,15 @@ import hashlib
 import hmac
 import json
 import os
+import sys
 from dataclasses import dataclass
 from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
 from urllib.request import Request as UrlRequest
 from urllib.request import urlopen
+
+from .xml_utils import attribute_key, strip_markup
 
 
 DEFAULT_AGENT_PROMPT = """As an automotive requirements engineer, analyze this requirement statement.
@@ -101,13 +104,14 @@ class OpenAIResponsesBackend:
             raise AgentBackendError("OpenAI API key is missing. Set OPENAI_API_KEY or REQIFY_OPENAI_API_KEY.")
         base_url = os.environ.get("REQIFY_OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
         model = os.environ.get("REQIFY_OPENAI_MODEL", "gpt-5.2").strip()
+        user_input = compose_user_input(request)
         payload: dict[str, object] = {
             "model": model,
             "instructions": system_prompt.strip(),
             "input": [
                 {
                     "role": "user",
-                    "content": [{"type": "input_text", "text": compose_user_input(request)}],
+                    "content": [{"type": "input_text", "text": user_input}],
                 }
             ],
             "max_output_tokens": int_env("REQIFY_AGENT_MAX_OUTPUT_TOKENS", 1200),
@@ -115,6 +119,7 @@ class OpenAIResponsesBackend:
         temperature = optional_float_env("REQIFY_AGENT_TEMPERATURE")
         if temperature is not None:
             payload["temperature"] = temperature
+        print_llm_prompts("openai", model, system_prompt, user_input)
         response = post_json(
             f"{base_url}/responses",
             payload,
@@ -142,12 +147,13 @@ class BedrockConverseBackend:
             )
         session_token = env_first("REQIFY_AWS_SESSION_TOKEN", "AWS_SESSION_TOKEN")
         endpoint = os.environ.get("REQIFY_BEDROCK_ENDPOINT", f"https://bedrock-runtime.{region}.amazonaws.com").rstrip("/")
+        user_input = compose_user_input(request)
         body: dict[str, object] = {
             "system": [{"text": system_prompt.strip()}],
             "messages": [
                 {
                     "role": "user",
-                    "content": [{"text": compose_user_input(request)}],
+                    "content": [{"text": user_input}],
                 }
             ],
             "inferenceConfig": {"maxTokens": int_env("REQIFY_AGENT_MAX_OUTPUT_TOKENS", 1200)},
@@ -157,6 +163,7 @@ class BedrockConverseBackend:
             inference_config = body["inferenceConfig"]
             if isinstance(inference_config, dict):
                 inference_config["temperature"] = temperature
+        print_llm_prompts("bedrock", model_id, system_prompt, user_input)
         response = aws_post_json(
             f"{endpoint}/model/{quote(model_id, safe='')}/converse",
             body,
@@ -186,6 +193,24 @@ def default_prompt() -> str:
 
 def agent_instructions() -> str:
     return f"{default_prompt().strip()}\n\n{STRUCTURED_RESPONSE_INSTRUCTIONS}"
+
+
+def debug_enabled() -> bool:
+    return os.environ.get("REQIFY_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def print_llm_prompts(backend: str, model: str, system_prompt: str, user_input: str) -> None:
+    if not debug_enabled():
+        return
+    print("\n=== Reqify LLM prompt debug ===", file=sys.stderr)
+    print(f"Backend: {backend}", file=sys.stderr)
+    if model:
+        print(f"Model: {model}", file=sys.stderr)
+    print("--- system ---", file=sys.stderr)
+    print(system_prompt.strip(), file=sys.stderr)
+    print("--- user ---", file=sys.stderr)
+    print(user_input.strip(), file=sys.stderr)
+    print("=== end Reqify LLM prompt debug ===\n", file=sys.stderr)
 
 
 def backend_from_config() -> AgentBackend:
@@ -227,25 +252,50 @@ def summarize_object(selected_object: dict[str, object] | None) -> str:
     type_name = selected_object.get("objectTypeName")
     if type_name:
         lines.append(f"Object type: {type_name}")
-    title = selected_object.get("title")
-    if title:
-        lines.append(f"Title: {title}")
     attributes = selected_object.get("attributes")
+    reqif_text_attribute = None
+    chapter_name_attribute = None
     if isinstance(attributes, list):
         for attribute in attributes:
             if not isinstance(attribute, dict):
                 continue
-            attr_id = str(attribute.get("id") or "")
-            name = str(attribute.get("name") or attr_id or "Attribute")
-            value = attribute.get("displayValue", attribute.get("value", ""))
-            if isinstance(value, list):
-                value = ", ".join(str(item) for item in value)
-            text = str(value).strip()
-            if text:
-                lines.append(f"Attribute id={attr_id} name={name}: {text[:700]}")
-            elif is_verification_attribute(attr_id, name):
-                lines.append(f"Attribute id={attr_id} name={name}: <empty>")
+            key = attribute_key(attribute)
+            if key == "reqiftext":
+                reqif_text_attribute = attribute
+            elif key == "reqifchaptername" or key.endswith("chaptername"):
+                chapter_name_attribute = attribute
+        if reqif_text_attribute:
+            lines.append(format_attribute_line(reqif_text_attribute, "Requirement text"))
+        elif selected_object.get("title"):
+            lines.append(f"Title: {strip_markup(str(selected_object.get('title') or ''))}")
+        if chapter_name_attribute:
+            lines.append(format_attribute_line(chapter_name_attribute, "Chapter name"))
+        for attribute in attributes:
+            if not isinstance(attribute, dict):
+                continue
+            if attribute is reqif_text_attribute or attribute is chapter_name_attribute:
+                continue
+            line = format_attribute_line(attribute, "Attribute")
+            if line:
+                lines.append(line)
+            else:
+                attr_id = str(attribute.get("id") or "")
+                name = str(attribute.get("name") or attr_id or "Attribute")
+                if is_verification_attribute(attr_id, name):
+                    lines.append(f"Attribute id={attr_id} name={name}: <empty>")
     return "\n".join(lines)
+
+
+def format_attribute_line(attribute: dict[str, object], label: str) -> str:
+    attr_id = str(attribute.get("id") or "")
+    name = str(attribute.get("name") or attr_id or "Attribute")
+    value = attribute.get("displayValue", attribute.get("value", ""))
+    if isinstance(value, list):
+        value = ", ".join(str(item) for item in value)
+    text = strip_markup(str(value)).strip()
+    if not text:
+        return ""
+    return f"{label} id={attr_id} name={name}: {text[:700]}"
 
 
 def is_verification_attribute(attribute_id: str, name: str) -> bool:

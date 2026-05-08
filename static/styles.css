@@ -562,11 +562,11 @@ body.resizing {
 
 .agent-input {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: 1fr;
   gap: 8px;
   padding: 10px;
-  border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
+  background: #ffffff;
 }
 
 .agent-prompt {
@@ -581,12 +581,15 @@ body.resizing {
 
 .agent-actions {
   display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
-  align-self: end;
 }
 
 .agent-actions button {
   width: 100%;
+  min-width: 0;
+  padding: 0 6px;
+  font-size: 12px;
 }
 
 .agent-response {
@@ -817,10 +820,6 @@ body.resizing {
 
   .agent-input {
     grid-template-columns: 1fr;
-  }
-
-  .agent-actions {
-    justify-self: start;
   }
 
   .status {

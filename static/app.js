@@ -14,6 +14,7 @@ const state = {
   localModifiedObjectIds: new Set(),
   comparisonModifiedObjectIds: new Set(),
   selectedHistoryObjects: null,
+  editorCursor: null,
   documentFilters: {
     modified: false,
     requirements: false,
@@ -40,6 +41,7 @@ const els = {
   historyForward: document.getElementById("historyForward"),
   agentPrompt: document.getElementById("agentPrompt"),
   agentAnalyze: document.getElementById("agentAnalyze"),
+  agentApply: document.getElementById("agentApply"),
   agentApplyNext: document.getElementById("agentApplyNext"),
   agentResponse: document.getElementById("agentResponse"),
   agentPreview: document.getElementById("agentPreview"),
@@ -144,7 +146,83 @@ function plainText(value) {
   return div.textContent.trim().replace(/\s+/g, " ");
 }
 
+function richTextToPlainText(value) {
+  const template = document.createElement("template");
+  template.innerHTML = String(value || "");
+  const blockTags = new Set([
+    "ADDRESS",
+    "ARTICLE",
+    "ASIDE",
+    "BLOCKQUOTE",
+    "DD",
+    "DIV",
+    "DL",
+    "DT",
+    "FIGCAPTION",
+    "FIGURE",
+    "FOOTER",
+    "H1",
+    "H2",
+    "H3",
+    "H4",
+    "H5",
+    "H6",
+    "HEADER",
+    "LI",
+    "MAIN",
+    "NAV",
+    "P",
+    "PRE",
+    "SECTION",
+    "TABLE",
+    "TBODY",
+    "TFOOT",
+    "THEAD",
+    "TR",
+    "UL",
+    "OL",
+  ]);
+  let line = "";
+  const lines = [];
+  const appendText = (text) => {
+    const normalized = String(text || "").replace(/\s+/g, " ");
+    if (!normalized.trim()) {
+      if (line && !line.endsWith(" ")) line += " ";
+      return;
+    }
+    line += normalized;
+  };
+  const flushLine = () => {
+    const trimmed = line.trim();
+    if (trimmed) lines.push(trimmed);
+    line = "";
+  };
+  const walk = (node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      appendText(node.textContent || "");
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    if (node.tagName === "BR") {
+      flushLine();
+      return;
+    }
+    if (blockTags.has(node.tagName) && line.trim()) flushLine();
+    [...node.childNodes].forEach(walk);
+    if (node.tagName === "TD" || node.tagName === "TH") appendText(" ");
+    if (blockTags.has(node.tagName)) flushLine();
+  };
+  [...template.content.childNodes].forEach(walk);
+  flushLine();
+  return lines.join("\n");
+}
+
+function plainTextToXhtml(value) {
+  return escapeHtml(value).replace(/\n/g, "<br>");
+}
+
 function ingest(payload) {
+  const uiState = payload.uiState && typeof payload.uiState === "object" ? payload.uiState : {};
   state.sessionId = payload.sessionId;
   state.fileName = payload.fileName || "";
   state.specifications = payload.specifications || [];
@@ -159,13 +237,107 @@ function ingest(payload) {
   state.localModifiedObjectIds = new Set();
   state.comparisonModifiedObjectIds = new Set();
   state.selectedHistoryObjects = null;
-  state.selectedId = state.selectedId && state.objects[state.selectedId] ? state.selectedId : state.documentOrder[0] || null;
+  state.selectedId = uiState.selectedId && state.objects[uiState.selectedId] ? uiState.selectedId : state.selectedId && state.objects[state.selectedId] ? state.selectedId : state.documentOrder[0] || null;
+  state.editorCursor = uiState.cursor && typeof uiState.cursor === "object" ? uiState.cursor : null;
+  if (typeof uiState.agentPrompt === "string") {
+    els.agentPrompt.value = uiState.agentPrompt;
+  }
   state.dirty = false;
   render();
-  setStatus(state.fileName || "Loaded");
+  restoreEditorCursor();
+  setStatus(payload.reusedSession ? `${state.fileName || "Loaded"} · recovered workspace` : state.fileName || "Loaded");
   els.exportButton.disabled = false;
   updateSaveState();
   updateAgentApplyState();
+}
+
+function captureUiState() {
+  captureActiveEditorCursor();
+  return {
+    selectedId: state.selectedId || "",
+    agentPrompt: els.agentPrompt.value,
+    cursor: state.editorCursor,
+  };
+}
+
+function textOffsetForPosition(root, target, offset) {
+  let position = 0;
+  const walk = (node) => {
+    if (node === target) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        position += Math.min(offset, node.textContent.length);
+      } else {
+        [...node.childNodes].slice(0, offset).forEach((child) => {
+          position += child.textContent.length;
+        });
+      }
+      return true;
+    }
+    if (node.nodeType === Node.TEXT_NODE) {
+      position += node.textContent.length;
+      return false;
+    }
+    return [...node.childNodes].some(walk);
+  };
+  walk(root);
+  return position;
+}
+
+function captureEditorCursor(editor) {
+  const selection = window.getSelection();
+  if (!selection || !selection.rangeCount) return;
+  const range = selection.getRangeAt(0);
+  if (!editor.contains(range.startContainer)) return;
+  state.editorCursor = {
+    objectId: editor.dataset.objectId || state.selectedId || "",
+    attrId: editor.dataset.attrId || "",
+    origin: editor.dataset.origin || "",
+    offset: textOffsetForPosition(editor, range.startContainer, range.startOffset),
+  };
+}
+
+function captureActiveEditorCursor() {
+  const active = document.activeElement;
+  if (active?.classList?.contains("xhtml-editor")) {
+    captureEditorCursor(active);
+  }
+}
+
+function setCursorByTextOffset(root, offset) {
+  const range = document.createRange();
+  const selection = window.getSelection();
+  let remaining = Math.max(0, Number(offset) || 0);
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node) {
+    const length = node.textContent.length;
+    if (remaining <= length) {
+      range.setStart(node, remaining);
+      range.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      return;
+    }
+    remaining -= length;
+    node = walker.nextNode();
+  }
+  range.selectNodeContents(root);
+  range.collapse(false);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function restoreEditorCursor() {
+  const cursor = state.editorCursor;
+  if (!cursor?.objectId || !cursor?.attrId) return;
+  requestAnimationFrame(() => {
+    const selector = `.xhtml-editor[data-object-id="${CSS.escape(cursor.objectId)}"][data-attr-id="${CSS.escape(cursor.attrId)}"]`;
+    const editor = document.querySelector(selector);
+    if (!editor) return;
+    selectObject(cursor.objectId);
+    editor.focus();
+    setCursorByTextOffset(editor, cursor.offset);
+  });
 }
 
 async function apiJson(url, options = {}) {
@@ -278,6 +450,7 @@ function agentEditsForSelection() {
 
 function updateAgentApplyState() {
   const edits = agentEditsForSelection();
+  els.agentApply.disabled = !edits.length;
   els.agentApplyNext.disabled = !edits.length;
   renderAgentPreview(edits);
 }
@@ -300,15 +473,25 @@ function renderAgentPreview(edits = agentEditsForSelection()) {
     const name = document.createElement("div");
     name.className = "agent-preview-label";
     name.textContent = label;
-    const editor = renderXhtmlEditor(edit.objectId || state.selectedId || "", { id: edit.attributeId || attr?.id || "", value: nextValue, editable: true }, "agent preview");
-    const editable = editor.querySelector(".xhtml-editor");
-    editable.addEventListener("input", () => {
-      const value = editable.innerHTML || "";
-      edit.valueMarkdown = plainText(value);
-      edit.valueXhtml = value;
-    });
     row.appendChild(name);
-    row.appendChild(editor);
+    if (attr?.type === "enumeration") {
+      row.appendChild(
+        renderAgentEnumerationEditor(attr, nextValue, (value) => {
+          edit.valueEnum = value;
+          edit.valueMarkdown = value.join(", ");
+          edit.valueXhtml = escapeHtml(edit.valueMarkdown);
+        }),
+      );
+    } else {
+      const editor = renderXhtmlEditor(edit.objectId || state.selectedId || "", { id: edit.attributeId || attr?.id || "", value: nextValue, editable: true }, "agent preview");
+      const editable = editor.querySelector(".xhtml-editor");
+      editable.addEventListener("input", () => {
+        const value = editable.innerHTML || "";
+        edit.valueMarkdown = plainText(value);
+        edit.valueXhtml = value;
+      });
+      row.appendChild(editor);
+    }
     els.agentPreview.appendChild(row);
   });
 }
@@ -341,6 +524,7 @@ function displayTitle(objectId) {
 function selectObject(objectId) {
   if (!state.objects[objectId]) return;
   state.selectedId = objectId;
+  state.editorCursor = state.editorCursor?.objectId === objectId ? state.editorCursor : null;
   renderTree();
   renderAttributes();
   updateAgentApplyState();
@@ -644,6 +828,89 @@ function renderMultiEnumerationEditor(objectId, attr) {
   return wrapper;
 }
 
+function renderAgentEnumerationEditor(attr, value, onChange) {
+  let selectedValues = Array.isArray(value) ? value.map(String) : [];
+  const setSelectedValues = (nextValues) => {
+    selectedValues = attr.multiple ? nextValues : nextValues.slice(0, 1);
+    onChange([...selectedValues]);
+  };
+  if (attr.multiple) {
+    const wrapper = document.createElement("div");
+    wrapper.className = "choice-multi";
+    const selected = document.createElement("div");
+    selected.className = "choice-selected";
+    const addRow = document.createElement("div");
+    addRow.className = "choice-add";
+    const renderSelected = () => {
+      selected.innerHTML = "";
+      selectedValues.forEach((optionId) => {
+        const entry = document.createElement("div");
+        entry.className = "choice-chip";
+        entry.innerHTML = `<span>${escapeHtml(optionLabel(attr, optionId))}</span>`;
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.title = "Remove";
+        remove.textContent = "×";
+        remove.addEventListener("click", () => {
+          setSelectedValues(selectedValues.filter((valueId) => valueId !== optionId));
+          renderSelected();
+          renderAddSelect();
+        });
+        entry.appendChild(remove);
+        selected.appendChild(entry);
+      });
+    };
+    const renderAddSelect = () => {
+      addRow.innerHTML = "";
+      const select = document.createElement("select");
+      select.className = "choice-select";
+      select.innerHTML = `<option value="">Add choice</option>`;
+      const selectedSet = new Set(selectedValues);
+      (attr.options || [])
+        .filter((option) => !selectedSet.has(option.id))
+        .forEach((option) => {
+          const optionNode = document.createElement("option");
+          optionNode.value = option.id;
+          optionNode.textContent = option.label || option.id;
+          select.appendChild(optionNode);
+        });
+      select.addEventListener("change", () => {
+        if (!select.value) return;
+        setSelectedValues([...selectedValues, select.value]);
+        renderSelected();
+        renderAddSelect();
+      });
+      addRow.appendChild(select);
+    };
+    renderSelected();
+    renderAddSelect();
+    wrapper.appendChild(selected);
+    wrapper.appendChild(addRow);
+    return wrapper;
+  }
+  const select = document.createElement("select");
+  select.className = "choice-select";
+  select.innerHTML = `<option value=""></option>`;
+  (attr.options || []).forEach((option) => {
+    const optionNode = document.createElement("option");
+    optionNode.value = option.id;
+    optionNode.textContent = option.label || option.id;
+    select.appendChild(optionNode);
+  });
+  const selected = selectedValues[0] || "";
+  if (selected && !(attr.options || []).some((option) => option.id === selected)) {
+    const unknownOption = document.createElement("option");
+    unknownOption.value = selected;
+    unknownOption.textContent = selected;
+    select.appendChild(unknownOption);
+  }
+  select.value = selected;
+  select.addEventListener("change", () => {
+    setSelectedValues(select.value ? [select.value] : []);
+  });
+  return select;
+}
+
 function renderXhtmlEditor(objectId, attr, origin) {
   const shell = document.createElement("div");
   shell.className = "editor-shell";
@@ -654,6 +921,7 @@ function renderXhtmlEditor(objectId, attr, origin) {
       <button type="button" data-command="underline" title="Underline">U</button>
       <button type="button" data-command="insertUnorderedList" title="Bullet list">•</button>
       <button type="button" data-command="insertOrderedList" title="Numbered list">1.</button>
+      <button type="button" data-action="plain-text" title="Convert to plain text">Tx</button>
       <button type="button" data-command="undo" title="Undo">↶</button>
       <button type="button" data-command="redo" title="Redo">↷</button>
     </div>
@@ -677,6 +945,9 @@ function renderXhtmlEditor(objectId, attr, origin) {
   };
   editor.addEventListener("focus", showToolbar);
   editor.addEventListener("blur", hideToolbar);
+  ["focus", "keyup", "mouseup", "input"].forEach((eventName) => {
+    editor.addEventListener(eventName, () => captureEditorCursor(editor));
+  });
   editor.addEventListener("input", () => {
     updateAttribute(objectId, attr.id, editor.innerHTML);
     syncEditors(objectId, attr.id, editor.innerHTML, editor);
@@ -689,7 +960,17 @@ function renderXhtmlEditor(objectId, attr, origin) {
       document.execCommand(button.dataset.command, false, null);
       updateAttribute(objectId, attr.id, editor.innerHTML);
       syncEditors(objectId, attr.id, editor.innerHTML, editor);
+      captureEditorCursor(editor);
     });
+  });
+  const plainTextButton = shell.querySelector('[data-action="plain-text"]');
+  plainTextButton.addEventListener("mousedown", (event) => event.preventDefault());
+  plainTextButton.addEventListener("click", () => {
+    editor.focus();
+    editor.innerHTML = plainTextToXhtml(richTextToPlainText(editor.innerHTML));
+    updateAttribute(objectId, attr.id, editor.innerHTML);
+    syncEditors(objectId, attr.id, editor.innerHTML, editor);
+    captureEditorCursor(editor);
   });
   return shell;
 }
@@ -974,7 +1255,7 @@ els.saveButton.addEventListener("click", async () => {
     const payload = await apiJson(`/api/session/${state.sessionId}/save`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ objects: updates, viewedCommit: viewedCommit() }),
+      body: JSON.stringify({ objects: updates, viewedCommit: viewedCommit(), uiState: captureUiState() }),
     });
     ingest(payload);
     setStatus(payload.committed ? `${state.fileName} · committed` : `${state.fileName} · unchanged`);
@@ -1033,7 +1314,7 @@ function isAgentEdit(edit) {
   );
 }
 
-function applyAgentSuggestionAndNext() {
+function applyAgentSuggestion({ advance = false } = {}) {
   const object = state.objects[state.selectedId];
   if (!object) return;
   const edits = agentEditsForSelection();
@@ -1043,6 +1324,7 @@ function applyAgentSuggestionAndNext() {
     const attr = findEditableAttribute(object, edit);
     if (!attr) return;
     const nextValue = agentEditValueForAttribute(attr, edit);
+    if (attr.type === "enumeration" && !nextValue.length) return;
     if (!nextValue) return;
     updateAttribute(object.id, attr.id, nextValue);
     syncEditors(object.id, attr.id, nextValue, null);
@@ -1056,7 +1338,14 @@ function applyAgentSuggestionAndNext() {
   updateAgentApplyState();
   setStatus(`${state.fileName} • unsaved`, true);
   renderDocument();
-  selectNextRequirement(object.id);
+  renderAttributes();
+  if (advance && selectNextRequirement(object.id)) {
+    analyzeWithAgent();
+  }
+}
+
+function applyAgentSuggestionAndNext() {
+  applyAgentSuggestion({ advance: true });
 }
 
 function findEditableAttribute(object, edit) {
@@ -1072,12 +1361,51 @@ function comparableAttributeName(value) {
   return key;
 }
 
+function enumOptionKey(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function enumEditCandidates(attr, edit) {
+  if (Array.isArray(edit.valueEnum)) return edit.valueEnum.map(String);
+  const candidates = [];
+  const add = (value) => {
+    const text = String(value || "").trim();
+    if (text) candidates.push(text);
+  };
+  add(edit.valueMarkdown);
+  add(plainText(markdownToXhtml(edit.valueMarkdown || "")));
+  add(plainText(edit.valueXhtml || ""));
+  if (edit.attributeId && edit.attributeId !== attr.id) add(edit.attributeId);
+  return candidates
+    .flatMap((candidate) => candidate.split(/[\n,;|]+/))
+    .map((candidate) => candidate.trim())
+    .filter(Boolean);
+}
+
+function enumValuesFromAgentEdit(attr, edit) {
+  const options = attr.options || [];
+  const optionsById = new Map(options.map((option) => [String(option.id), String(option.id)]));
+  const optionsByKey = new Map();
+  options.forEach((option) => {
+    optionsByKey.set(enumOptionKey(option.id), String(option.id));
+    optionsByKey.set(enumOptionKey(option.label), String(option.id));
+  });
+  const resolved = [];
+  enumEditCandidates(attr, edit).forEach((candidate) => {
+    const exact = optionsById.get(candidate);
+    const normalized = optionsByKey.get(enumOptionKey(candidate));
+    const optionId = exact || normalized;
+    if (optionId && !resolved.includes(optionId)) resolved.push(optionId);
+  });
+  return attr.multiple ? resolved : resolved.slice(0, 1);
+}
+
 function agentEditValueForAttribute(attr, edit) {
   if (attr.type === "xhtml") {
     if (edit.valueMarkdown) return markdownToXhtml(edit.valueMarkdown);
     return sanitizeXhtmlFragment(edit.valueXhtml);
   }
-  if (attr.type === "enumeration") return attr.value;
+  if (attr.type === "enumeration") return enumValuesFromAgentEdit(attr, edit);
   return plainText(markdownToXhtml(edit.valueMarkdown || edit.valueXhtml));
 }
 
@@ -1088,9 +1416,10 @@ function selectNextRequirement(currentObjectId) {
     const object = state.objects[objectId];
     return object && objectKind(object) === "requirement" && reqifTextAttr(object);
   });
-  if (!nextId) return;
+  if (!nextId) return null;
   selectObject(nextId);
   focusDocumentEditor(nextId);
+  return nextId;
 }
 
 function focusDocumentEditor(objectId) {
@@ -1118,6 +1447,7 @@ function bindDocumentFilter(input, key) {
 }
 
 els.agentAnalyze.addEventListener("click", analyzeWithAgent);
+els.agentApply.addEventListener("click", () => applyAgentSuggestion());
 els.agentApplyNext.addEventListener("click", applyAgentSuggestionAndNext);
 bindDocumentFilter(els.filterModified, "modified");
 bindDocumentFilter(els.filterRequirements, "requirements");

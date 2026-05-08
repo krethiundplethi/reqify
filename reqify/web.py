@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import mimetypes
 import os
@@ -106,7 +107,7 @@ class ReqifyHandler(BaseHTTPRequestHandler):
                     return
                 viewed_commit = str(payload.get("viewedCommit", ""))
                 try:
-                    self.send_json(save_session(session_id, updates, viewed_commit))
+                    self.send_json(save_session(session_id, updates, viewed_commit, payload.get("uiState")))
                 except ValueError as exc:
                     self.send_error_json(HTTPStatus.CONFLICT, str(exc))
             elif path == "/api/agent/analyze":
@@ -176,7 +177,12 @@ class ReqifyHandler(BaseHTTPRequestHandler):
             self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Run the Reqify web editor.")
+    parser.add_argument("--debug", action="store_true", help="Print LLM system and user prompts to stderr.")
+    args = parser.parse_args(argv)
+    if args.debug:
+        os.environ["REQIFY_DEBUG"] = "1"
     ensure_dirs()
     host = os.environ.get("REQIFY_HOST", "127.0.0.1")
     port = int(os.environ.get("REQIFY_PORT", "8080"))
