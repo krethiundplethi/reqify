@@ -55,6 +55,10 @@ def print_git_debug(repo: Path, command: list[str], returncode: int, stdout: str
     print(f"cwd: {repo}", file=sys.stderr)
     print(f"$ {shlex.join(command)}", file=sys.stderr)
     print(f"exit: {returncode}", file=sys.stderr)
+    if len(command) > 1 and command[1] == "show":
+        print("output: <suppressed for git show>", file=sys.stderr)
+        print("=== end Reqify git debug ===\n", file=sys.stderr)
+        return
     print("--- stdout ---", file=sys.stderr)
     print(stdout.rstrip() if stdout else "<empty>", file=sys.stderr)
     print("--- stderr ---", file=sys.stderr)

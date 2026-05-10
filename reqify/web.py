@@ -20,6 +20,7 @@ from .jobs import job_payload, start_job
 from .session_store import (
     create_session,
     create_export_artifact,
+    create_filtered_export_artifact,
     export_session,
     history_payload,
     load_export_artifact,
@@ -159,6 +160,15 @@ class ReqifyHandler(BaseHTTPRequestHandler):
             elif path.startswith("/api/session/") and path.endswith("/export"):
                 session_id = path.split("/")[3]
                 job_id = start_job("Prepare export", lambda: create_export_artifact(session_id))
+                self.send_json({"jobId": job_id})
+            elif path.startswith("/api/session/") and path.endswith("/export-filtered"):
+                session_id = path.split("/")[3]
+                payload = json.loads(self.read_body().decode("utf-8"))
+                object_ids = payload.get("objectIds", [])
+                if not isinstance(object_ids, list) or not all(isinstance(object_id, str) for object_id in object_ids):
+                    self.send_error_json(HTTPStatus.BAD_REQUEST, "Invalid filtered export payload")
+                    return
+                job_id = start_job("Prepare filtered export", lambda: create_filtered_export_artifact(session_id, object_ids))
                 self.send_json({"jobId": job_id})
             elif path == "/api/agent/analyze":
                 payload = json.loads(self.read_body().decode("utf-8"))

@@ -12,6 +12,8 @@ from pathlib import Path
 
 from .config import DATA_DIR, ensure_dirs, safe_name
 from .git_repo import commit_repo, init_repo, run_git, run_git_bytes
+from .reqif_export import export_filtered_session as build_filtered_export_session
+from .reqif_export import export_session as build_export_session
 from .reqif_document import ReqifDocument
 from .xml_utils import attribute_key, strip_markup
 
@@ -274,27 +276,28 @@ def payload_at_commit(session_id: str, commit: str) -> dict[str, object]:
     return payload
 
 
-def edited_export_name(original_name: str, fallback_suffix: str) -> str:
-    path = Path(original_name)
-    suffix = path.suffix or fallback_suffix
-    stem = path.name[: -len(path.suffix)] if path.suffix else path.name
-    return f"{stem}-edited{suffix}"
-
-
 def export_session(session_id: str) -> tuple[str, bytes, str]:
     meta = session_meta(session_id)
-    repo = repo_dir(session_id)
-    original_name = str(meta["originalName"])
-    if meta.get("isZip"):
-        export_name = edited_export_name(original_name, ".reqifz")
-        export_path = session_dir(session_id) / export_name
-        with zipfile.ZipFile(export_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            for path in repo.rglob("*"):
-                if path.is_file() and ".git" not in path.parts and path.relative_to(repo).as_posix() != UI_STATE_REL:
-                    archive.write(path, path.relative_to(repo))
-        return export_name, export_path.read_bytes(), "application/zip"
-    export_name = edited_export_name(original_name, ".reqif")
-    return export_name, document_path(session_id).read_bytes(), "application/xml"
+    return build_export_session(
+        str(meta["originalName"]),
+        bool(meta.get("isZip")),
+        repo_dir(session_id),
+        document_path(session_id),
+        session_dir(session_id),
+        UI_STATE_REL,
+    )
+
+
+def export_filtered_session(session_id: str, object_ids: list[str]) -> tuple[str, bytes, str]:
+    meta = session_meta(session_id)
+    return build_filtered_export_session(
+        str(meta["originalName"]),
+        bool(meta.get("isZip")),
+        repo_dir(session_id),
+        document_path(session_id),
+        Path(str(meta["documentRel"])),
+        object_ids,
+    )
 
 
 def export_artifact_dir(session_id: str) -> Path:
@@ -303,6 +306,15 @@ def export_artifact_dir(session_id: str) -> Path:
 
 def create_export_artifact(session_id: str) -> dict[str, str]:
     export_name, body, content_type = export_session(session_id)
+    return write_export_artifact(session_id, export_name, body, content_type)
+
+
+def create_filtered_export_artifact(session_id: str, object_ids: list[str]) -> dict[str, str]:
+    export_name, body, content_type = export_filtered_session(session_id, object_ids)
+    return write_export_artifact(session_id, export_name, body, content_type)
+
+
+def write_export_artifact(session_id: str, export_name: str, body: bytes, content_type: str) -> dict[str, str]:
     export_id = uuid.uuid4().hex
     target = export_artifact_dir(session_id)
     target.mkdir(parents=True, exist_ok=True)

@@ -28,6 +28,7 @@ const els = {
   fileInput: document.getElementById("fileInput"),
   saveButton: document.getElementById("saveButton"),
   exportButton: document.getElementById("exportButton"),
+  exportFilteredButton: document.getElementById("exportFilteredButton"),
   status: document.getElementById("status"),
   tree: document.getElementById("tree"),
   documentView: document.getElementById("documentView"),
@@ -260,8 +261,8 @@ function ingest(payload) {
   render();
   restoreEditorCursor();
   setStatus(payload.reusedSession ? `${state.fileName || "Loaded"} · recovered workspace` : state.fileName || "Loaded");
-  els.exportButton.disabled = false;
   updateSaveState();
+  updateExportState();
   updateAgentApplyState();
 }
 
@@ -403,6 +404,14 @@ async function runAsyncOperation(startOperation, message) {
   }
 }
 
+function startDownload(downloadUrl) {
+  const frame = document.createElement("iframe");
+  frame.hidden = true;
+  frame.src = downloadUrl;
+  document.body.appendChild(frame);
+  setTimeout(() => frame.remove(), 60000);
+}
+
 function dirtyAttributeKey(objectId, attrId) {
   return `${objectId}\u0000${attrId}`;
 }
@@ -417,6 +426,7 @@ function markDirty(objectId = null, attrId = null) {
   }
   setStatus(`${state.fileName} • unsaved`, true);
   updateSaveState();
+  updateExportState();
 }
 
 function viewedCommit() {
@@ -430,6 +440,25 @@ function isViewingHead() {
 function updateSaveState() {
   els.saveButton.disabled = !isViewingHead() || !state.dirty;
   els.saveButton.title = !isViewingHead() ? "Checkout HEAD before saving" : state.dirty ? "Commit edits" : "No edits to save";
+}
+
+function hasActiveDocumentFilter() {
+  return Object.values(state.documentFilters).some(Boolean);
+}
+
+function updateExportState() {
+  els.exportButton.disabled = !state.sessionId;
+  els.exportButton.title = state.sessionId ? "Export full document" : "Load a ReqIF before exporting";
+  const filteredCount = state.sessionId ? visibleDocumentObjectIds().length : 0;
+  const canExportFiltered = Boolean(state.sessionId) && hasActiveDocumentFilter() && filteredCount > 0;
+  els.exportFilteredButton.disabled = !canExportFiltered;
+  els.exportFilteredButton.title = !state.sessionId
+    ? "Load a ReqIF before exporting"
+    : !hasActiveDocumentFilter()
+      ? "Enable a document filter before exporting a filtered view"
+      : filteredCount
+        ? "Export currently filtered view"
+        : "No visible filtered items to export";
 }
 
 function effectiveModifiedObjectIds() {
@@ -619,6 +648,7 @@ function render() {
   renderAttributes();
   renderHistory();
   updateAgentApplyState();
+  updateExportState();
 }
 
 function renderTree() {
@@ -748,6 +778,7 @@ function renderDocument() {
   els.documentView.innerHTML = "";
   els.documentView.className = "document-view";
   renderDocumentFilterCount();
+  updateExportState();
   if (!state.documentOrder.length) {
     els.documentView.className = "document-view empty-state";
     els.documentView.textContent = "No content";
@@ -1166,6 +1197,7 @@ function updateDocumentModificationState(objectId) {
     node.classList.toggle("modified-item", modified);
   });
   if (state.documentFilters.modified && !shouldShowDocumentObject(objectId)) renderDocument();
+  updateExportState();
 }
 
 function renderHistory() {
@@ -1417,8 +1449,34 @@ els.exportButton.addEventListener("click", async () => {
       "Preparing export...",
     );
     if (!payload?.downloadUrl) throw new Error("Export did not produce a download.");
-    window.location.href = payload.downloadUrl;
+    startDownload(payload.downloadUrl);
     setStatus(`${state.fileName} · export ready`);
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+
+els.exportFilteredButton.addEventListener("click", async () => {
+  if (!state.sessionId || !hasActiveDocumentFilter()) return;
+  const objectIds = visibleDocumentObjectIds();
+  if (!objectIds.length) {
+    setStatus("No filtered items to export.", true);
+    updateExportState();
+    return;
+  }
+  setStatus("Exporting filtered view...");
+  try {
+    const payload = await runAsyncOperation(
+      () => apiJson(`/api/session/${state.sessionId}/export-filtered`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ objectIds }),
+      }),
+      "Preparing filtered export...",
+    );
+    if (!payload?.downloadUrl) throw new Error("Filtered export did not produce a download.");
+    startDownload(payload.downloadUrl);
+    setStatus(`${state.fileName} · filtered export ready`);
   } catch (error) {
     setStatus(error.message, true);
   }
@@ -1603,6 +1661,7 @@ function bindDocumentFilter(input, key) {
     state.documentFilters[key] = input.checked;
     renderDocument();
     recoverDocumentSelection(previousSelection);
+    updateExportState();
   });
 }
 

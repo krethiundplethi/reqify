@@ -235,13 +235,26 @@ class ReqifDocument:
         title = strip_markup(str((chapter_attr or reqif_text_attr or xhtml_attr or text_attr or {}).get("value", "")))
         return title[:90] if title else spec_id
 
+    def _is_heading_object(self, spec_id: str) -> bool:
+        spec_object = self.spec_objects.get(spec_id)
+        if spec_object is None:
+            return False
+        type_id = self._spec_object_type_ref(spec_object)
+        type_name = self.spec_object_type_names.get(type_id, "")
+        return type_id.strip().lower() == "heading" or type_name.strip().lower() == "heading"
+
     def _hierarchy_node(self, hierarchy: ET.Element, number: str) -> dict[str, object] | None:
         object_ref = descendant_text(hierarchy, "SPEC-OBJECT-REF")
         children_container = direct_container(hierarchy, "CHILDREN")
         children = []
         if children_container is not None:
-            for index, child in enumerate(child_elements(children_container, "SPEC-HIERARCHY"), start=1):
-                child_number = f"{number}.{index}" if number else str(index)
+            heading_index = 0
+            for child in child_elements(children_container, "SPEC-HIERARCHY"):
+                child_ref = descendant_text(child, "SPEC-OBJECT-REF")
+                child_number = ""
+                if child_ref and self._is_heading_object(child_ref):
+                    heading_index += 1
+                    child_number = f"{number}.{heading_index}" if number else str(heading_index)
                 node = self._hierarchy_node(child, child_number)
                 if node:
                     children.append(node)
@@ -263,8 +276,14 @@ class ReqifDocument:
             children_container = direct_container(specification, "CHILDREN")
             children = []
             if children_container is not None:
-                for index, hierarchy in enumerate(child_elements(children_container, "SPEC-HIERARCHY"), start=1):
-                    node = self._hierarchy_node(hierarchy, str(index))
+                heading_index = 0
+                for hierarchy in child_elements(children_container, "SPEC-HIERARCHY"):
+                    object_ref = descendant_text(hierarchy, "SPEC-OBJECT-REF")
+                    number = ""
+                    if object_ref and self._is_heading_object(object_ref):
+                        heading_index += 1
+                        number = str(heading_index)
+                    node = self._hierarchy_node(hierarchy, number)
                     if node:
                         children.append(node)
             specs.append(
