@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -187,11 +188,12 @@ class ReqifDocument:
         existing_ids = {str(attribute["id"]) for attribute in attributes}
         type_id = self._spec_object_type_ref(spec_object)
         for attr_id in self.spec_object_type_attribute_ids.get(type_id, []):
-            if attr_id in existing_ids or not self._is_verification_criteria_definition(attr_id):
+            if attr_id in existing_ids or not self._is_verification_field_definition(attr_id):
                 continue
             definition = self.attribute_defs.get(attr_id, {})
             kind = str(definition.get("kind", "string"))
-            attributes.append(self._attribute_payload(attr_id, kind, "", missing=True))
+            value: object = [] if kind == "enumeration" else ""
+            attributes.append(self._attribute_payload(attr_id, kind, value, missing=True))
         return attributes
 
     def _attribute_payload(self, attr_id: str, kind: str, value: object, missing: bool = False) -> dict[str, object]:
@@ -213,10 +215,16 @@ class ReqifDocument:
             "missing": missing,
         }
 
-    def _is_verification_criteria_definition(self, attr_id: str) -> bool:
+    def _is_verification_field_definition(self, attr_id: str) -> bool:
         name = self.definition_names.get(attr_id, attr_id)
         key = "".join(char for char in name.lower() if char.isalnum())
-        return "verification" in key and ("criteria" in key or "criterion" in key)
+        return "verification" in key and (
+            "criteria" in key
+            or "criterion" in key
+            or "method" in key
+            or "measure" in key
+            or "domain" in key
+        )
 
     def _title_for(self, spec_id: str, attributes: list[dict[str, object]] | None = None) -> str:
         attrs = attributes if attributes is not None else self._object_attributes(self.spec_objects[spec_id])
@@ -321,14 +329,15 @@ class ReqifDocument:
         }
 
     def apply_updates(self, updates: dict[str, object]) -> None:
+        last_change = reqif_timestamp()
         for object_id, attr_updates in updates.items():
             spec_object = self.spec_objects.get(object_id)
             if spec_object is None or not isinstance(attr_updates, dict):
                 continue
+            object_changed = False
             values = direct_container(spec_object, "VALUES")
             if values is None:
-                values = ET.Element(qualified_like(spec_object, "VALUES"))
-                spec_object.insert(0, values)
+                values = self._create_values_container(spec_object)
             applied_ids = set()
             for value_element in list(values):
                 if not local_name(value_element.tag).startswith("ATTRIBUTE-VALUE"):
@@ -344,8 +353,9 @@ class ReqifDocument:
                     value = str(raw_value)
                     the_value = first_child(value_element, "THE-VALUE")
                     if the_value is None:
-                        the_value = ET.SubElement(value_element, "THE-VALUE")
+                        the_value = self._append_child(value_element, "THE-VALUE", "\n              ")
                     replace_xhtml_value(the_value, value)
+                    self._format_xhtml_value(the_value)
                 elif "THE-VALUE" in value_element.attrib:
                     value_element.set("THE-VALUE", str(raw_value))
                 else:
@@ -355,6 +365,7 @@ class ReqifDocument:
                         the_value.clear()
                         the_value.text = value
                 applied_ids.add(attr_id)
+                object_changed = True
             type_id = self._spec_object_type_ref(spec_object)
             allowed_ids = set(self.spec_object_type_attribute_ids.get(type_id, []))
             for attr_id, update in attr_updates.items():
@@ -366,13 +377,85 @@ class ReqifDocument:
                     continue
                 value_element = self._create_value_element(values, str(attr_id), kind)
                 self._apply_value_update(value_element, update["value"])
+                object_changed = True
+            if object_changed:
+                spec_object.set("LAST-CHANGE", last_change)
 
     def _create_value_element(self, values: ET.Element, attr_id: str, kind: str) -> ET.Element:
+        children = list(values)
+        if children:
+            child_indent = self._child_indent(values, "\n            ")
+            closing_indent = self._closing_indent(values, child_indent)
+            children[-1].tail = child_indent
+        else:
+            closing_indent = values.text if self._is_indent(values.text) else "\n          "
+            child_indent = self._deeper_indent(closing_indent)
+            values.text = child_indent
         value_element = ET.SubElement(values, qualified_like(values, f"ATTRIBUTE-VALUE-{kind.upper()}"))
+        value_element.text = self._deeper_indent(child_indent)
+        value_element.tail = closing_indent
         definition = ET.SubElement(value_element, qualified_like(values, "DEFINITION"))
+        definition.text = self._deeper_indent(value_element.text)
+        definition.tail = value_element.text
         ref = ET.SubElement(definition, qualified_like(values, f"ATTRIBUTE-DEFINITION-{kind.upper()}-REF"))
         ref.text = attr_id
+        ref.tail = definition.tail
         return value_element
+
+    def _create_values_container(self, spec_object: ET.Element) -> ET.Element:
+        child_indent = self._child_indent(spec_object, "\n          ")
+        closing_indent = self._closing_indent(spec_object, child_indent)
+        children = list(spec_object)
+        values = ET.Element(qualified_like(spec_object, "VALUES"))
+        values.text = self._deeper_indent(child_indent)
+        values.tail = child_indent if children else closing_indent
+        if spec_object.text is None:
+            spec_object.text = child_indent
+        spec_object.insert(0, values)
+        return values
+
+    def _append_child(self, parent: ET.Element, tag_name: str, fallback_indent: str) -> ET.Element:
+        children = list(parent)
+        if children:
+            child_indent = self._child_indent(parent, fallback_indent)
+            closing_indent = self._closing_indent(parent, child_indent)
+            children[-1].tail = child_indent
+        else:
+            closing_indent = parent.text if self._is_indent(parent.text) else self._less_indented(fallback_indent)
+            child_indent = self._deeper_indent(closing_indent)
+            parent.text = child_indent
+        child = ET.SubElement(parent, qualified_like(parent, tag_name))
+        child.tail = closing_indent
+        return child
+
+    def _child_indent(self, parent: ET.Element, fallback: str) -> str:
+        if self._is_indent(parent.text):
+            return parent.text or fallback
+        for child in list(parent):
+            if self._is_indent(child.tail):
+                return child.tail or fallback
+        return fallback
+
+    def _closing_indent(self, parent: ET.Element, child_indent: str) -> str:
+        children = list(parent)
+        if children and self._is_indent(children[-1].tail) and children[-1].tail != child_indent:
+            return children[-1].tail or self._less_indented(child_indent)
+        return self._less_indented(child_indent)
+
+    @staticmethod
+    def _is_indent(value: str | None) -> bool:
+        return value is not None and "\n" in value and not value.strip()
+
+    @staticmethod
+    def _deeper_indent(indent: str | None) -> str:
+        return f"{indent or ''}  "
+
+    @staticmethod
+    def _less_indented(indent: str) -> str:
+        newline, _, spaces = indent.rpartition("\n")
+        if not newline and not indent.startswith("\n"):
+            return indent
+        return f"{newline}\n{spaces[:-2] if len(spaces) >= 2 else spaces}"
 
     def _apply_value_update(self, value_element: ET.Element, raw_value: object) -> None:
         if local_name(value_element.tag) == "ATTRIBUTE-VALUE-ENUMERATION":
@@ -380,9 +463,9 @@ class ReqifDocument:
         elif local_name(value_element.tag) == "ATTRIBUTE-VALUE-XHTML":
             the_value = first_child(value_element, "THE-VALUE")
             if the_value is None:
-                the_value = ET.Element(qualified_like(value_element, "THE-VALUE"))
-                value_element.insert(0, the_value)
+                the_value = self._append_child(value_element, "THE-VALUE", "\n              ")
             replace_xhtml_value(the_value, str(raw_value))
+            self._format_xhtml_value(the_value)
         else:
             value_element.set("THE-VALUE", str(raw_value))
 
@@ -395,7 +478,7 @@ class ReqifDocument:
             selected_refs = []
         values_element = first_child(value_element, "VALUES")
         if values_element is None:
-            values_element = ET.SubElement(value_element, qualified_like(value_element, "VALUES"))
+            values_element = self._append_child(value_element, "VALUES", "\n              ")
         ref_tag = qualified_like(value_element, "ENUM-VALUE-REF")
         for child in values_element.iter():
             if local_name(child.tag).endswith("-REF"):
@@ -403,9 +486,33 @@ class ReqifDocument:
                 break
         for child in list(values_element):
             values_element.remove(child)
+        child_indent = self._child_indent(values_element, "\n                ")
+        closing_indent = self._closing_indent(values_element, child_indent)
+        values_element.text = child_indent if selected_refs else None
         for selected_ref in selected_refs:
             ref_element = ET.SubElement(values_element, ref_tag)
             ref_element.text = selected_ref
+            ref_element.tail = child_indent
+        if selected_refs:
+            list(values_element)[-1].tail = closing_indent
+
+    def _format_xhtml_value(self, the_value: ET.Element) -> None:
+        children = list(the_value)
+        if not children or (the_value.text and the_value.text.strip()):
+            return
+        child_indent = self._child_indent(the_value, "\n                ")
+        closing_indent = self._closing_indent(the_value, child_indent)
+        the_value.text = child_indent
+        for child in children[:-1]:
+            if not self._is_indent(child.tail):
+                child.tail = child_indent
+        if not self._is_indent(children[-1].tail):
+            children[-1].tail = closing_indent
 
     def write(self) -> None:
         self.tree.write(self.xml_path, encoding="utf-8", xml_declaration=True, short_empty_elements=True)
+
+
+def reqif_timestamp() -> str:
+    value = datetime.now().astimezone()
+    return f"{value:%Y-%m-%dT%H:%M:%S}.{value.microsecond // 1000:03d}{value:%z}"[:-2] + ":" + f"{value:%z}"[-2:]

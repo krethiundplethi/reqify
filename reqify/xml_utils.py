@@ -42,9 +42,25 @@ def element_inner_xml(element: ET.Element | None) -> str:
     if element.text:
         parts.append(html.escape(element.text))
     for child in list(element):
-        parts.append(ET.tostring(child, encoding="unicode", short_empty_elements=True))
-        if child.tail:
-            parts.append(html.escape(child.tail))
+        parts.append(browser_html_fragment(child))
+    return "".join(parts)
+
+
+def browser_html_fragment(element: ET.Element) -> str:
+    tag = local_name(element.tag)
+    attrs = "".join(f' {local_name(name)}="{html.escape(value, quote=True)}"' for name, value in element.attrib.items())
+    parts: list[str] = []
+    if tag.lower() in VOID_TAGS and not list(element) and not element.text:
+        parts.append(f"<{tag}{attrs}>")
+    else:
+        parts.append(f"<{tag}{attrs}>")
+        if element.text:
+            parts.append(html.escape(element.text))
+        for child in list(element):
+            parts.append(browser_html_fragment(child))
+        parts.append(f"</{tag}>")
+    if element.tail:
+        parts.append(html.escape(element.tail))
     return "".join(parts)
 
 
@@ -91,8 +107,12 @@ def direct_container(parent: ET.Element, name: str) -> ET.Element | None:
 
 def normalize_fragment(fragment: str) -> str:
     fragment = fragment.replace("&nbsp;", "&#160;")
+    fragment = re.sub(r'\s+xmlns(?::[A-Za-z_][\w.-]*)?="[^"]*"', "", fragment)
+    fragment = re.sub(r"</?(?:xhtml|html):", lambda match: match.group(0).replace("xhtml:", "").replace("html:", ""), fragment)
+    fragment = re.sub(r"<br\s*/\s*>", "<br />", fragment, flags=re.IGNORECASE)
     for tag in VOID_TAGS:
         fragment = re.sub(rf"<{tag}([^>/]*?)>", rf"<{tag}\1 />", fragment, flags=re.IGNORECASE)
+        fragment = re.sub(rf"</{tag}>", "", fragment, flags=re.IGNORECASE)
     return fragment
 
 
@@ -102,7 +122,9 @@ def parse_xhtml_fragment(fragment: str) -> ET.Element:
 
 
 def replace_xhtml_value(the_value: ET.Element, fragment: str) -> None:
+    tail = the_value.tail
     the_value.clear()
+    the_value.tail = tail
     wrapper = parse_xhtml_fragment(fragment)
     the_value.text = wrapper.text
     for child in list(wrapper):

@@ -23,6 +23,54 @@ body {
   background: var(--bg);
 }
 
+.operation-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  background: rgba(31, 41, 51, 0.34);
+}
+
+.operation-overlay[hidden] {
+  display: none;
+}
+
+.operation-dialog {
+  min-width: 260px;
+  max-width: min(360px, calc(100vw - 32px));
+  display: grid;
+  justify-items: center;
+  gap: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 22px 24px;
+  box-shadow: 0 18px 50px rgba(31, 41, 51, 0.18);
+}
+
+.operation-spinner {
+  width: 34px;
+  height: 34px;
+  border: 3px solid #d8dee5;
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: operation-spin 0.8s linear infinite;
+}
+
+.operation-message {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 700;
+  text-align: center;
+}
+
+@keyframes operation-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 button,
 .file-button {
   height: 34px;
@@ -495,6 +543,12 @@ body.resizing {
   font: inherit;
 }
 
+.multiline-input {
+  min-height: 84px;
+  line-height: 1.45;
+  resize: vertical;
+}
+
 .choice-select {
   width: 100%;
   min-height: 34px;
@@ -563,6 +617,10 @@ body.resizing {
 .attributes-view .choice-select {
   min-height: 30px;
   padding: 5px 7px;
+}
+
+.attributes-view .multiline-input {
+  min-height: 78px;
 }
 
 .attributes-view .xhtml-editor {

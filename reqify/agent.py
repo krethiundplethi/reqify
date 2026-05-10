@@ -19,12 +19,12 @@ from .xml_utils import attribute_key, strip_markup
 DEFAULT_AGENT_PROMPT = """As an automotive requirements engineer, analyze this requirement statement.
 Be as concise as possible.
 Do not include what works, positive observations, risk sections, or discussion.
-Return only terse findings, one quality rating, verification criteria, and concrete suggested edits.
+Return only terse findings, one quality rating, verification fields, and concrete suggested edits.
 
 Guidance:
 - "well_formed" considers clarity, singularity, unambiguity, measurable criteria, absence of design constraint unless intended.
-- Analyze and improve both the requirement text and Verification Criteria.
-- If Verification Criteria are missing or weak, include a concrete edit for the exact verification criteria attribute from context.
+- Analyze and improve the requirement text and verification fields: Verification Criteria, Verification Method or Measure, and Verification Domain.
+- If a verification field is missing or weak, include a concrete edit for the exact verification attribute from context.
 - Minimalistic edits.
 """
 
@@ -46,8 +46,9 @@ AGENT_RESPONSE_SCHEMA: dict[str, object] = {
                     "attributeName": {"type": "string"},
                     "valueMarkdown": {"type": "string"},
                     "valueXhtml": {"type": "string"},
+                    "valueEnum": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["objectId", "attributeId", "attributeName", "valueMarkdown", "valueXhtml"],
+                "required": ["objectId", "attributeId", "attributeName"],
                 "additionalProperties": False,
             },
         },
@@ -58,14 +59,15 @@ AGENT_RESPONSE_SCHEMA: dict[str, object] = {
 
 STRUCTURED_RESPONSE_INSTRUCTIONS = """Return only JSON matching this schema:
 {
-  "markdown": "Concise markdown. Start with exactly one rating line: quality: high, quality: medium, or quality: low. Then include only terse improvement finding and verification criteria.",
+  "markdown": "Concise markdown. Start with exactly one rating line: quality: high, quality: medium, or quality: low. Then include only terse improvement finding and verification fields.",
   "edits": [
     {
       "objectId": "selected ReqIF object id",
       "attributeId": "exact attribute id from the selected item context",
       "attributeName": "exact attribute name from the selected item context",
       "valueMarkdown": "complete replacement value in markdown",
-      "valueXhtml": "complete replacement value as XHTML fragment"
+      "valueXhtml": "complete replacement value as XHTML fragment",
+      "valueEnum": ["for enumeration fields only, selected option labels or ids"]
     }
   ]
 }
@@ -74,7 +76,8 @@ Keep markdown short.
 Use exactly one quality rating: high, medium, or low.
 Do not use numeric scores, letter grades, well_formed, or multiple ratings.
 No positive feedback, no risk section, no discussion.
-Include edits for requirement text and Verification Criteria when either needs improvement and the field exists. 
+Include edits for requirement text and verification fields when any needs improvement and the field exists.
+For enumeration fields, use valueEnum with allowed option labels or ids from context.
 Use edits only for fields where you propose a concrete replacement.
 Preserve the full intended field value, not a diff."""
 
@@ -271,7 +274,7 @@ def summarize_object(selected_object: dict[str, object] | None) -> str:
             elif key == "reqifchaptername" or key.endswith("chaptername"):
                 chapter_name_attribute = attribute
         if reqif_text_attribute:
-            lines.append(format_attribute_line(reqif_text_attribute, "Requirement text"))
+            lines.append(format_attribute_line(reqif_text_attribute, "Requirement text", 1200))
         elif selected_object.get("title"):
             lines.append(f"Title: {strip_markup(str(selected_object.get('title') or ''))}")
         if chapter_name_attribute:
@@ -288,11 +291,11 @@ def summarize_object(selected_object: dict[str, object] | None) -> str:
                 attr_id = str(attribute.get("id") or "")
                 name = str(attribute.get("name") or attr_id or "Attribute")
                 if is_verification_attribute(attr_id, name):
-                    lines.append(f"Attribute id={attr_id} name={name}: <empty>")
+                    lines.append(f"Attribute id={attr_id} name={name}: <empty>{format_attribute_options(attribute)}")
     return "\n".join(lines)
 
 
-def format_attribute_line(attribute: dict[str, object], label: str) -> str:
+def format_attribute_line(attribute: dict[str, object], label: str, limit: int = 700) -> str:
     attr_id = str(attribute.get("id") or "")
     name = str(attribute.get("name") or attr_id or "Attribute")
     value = attribute.get("displayValue", attribute.get("value", ""))
@@ -301,12 +304,33 @@ def format_attribute_line(attribute: dict[str, object], label: str) -> str:
     text = strip_markup(str(value)).strip()
     if not text:
         return ""
-    return f"{label} id={attr_id} name={name}: {text[:700]}"
+    suffix = format_attribute_options(attribute) if is_verification_attribute(attr_id, name) else ""
+    return f"{label} id={attr_id} name={name}: {text[:limit]}{suffix}"
+
+
+def format_attribute_options(attribute: dict[str, object]) -> str:
+    options = attribute.get("options")
+    if not isinstance(options, list):
+        return ""
+    labels = []
+    for option in options:
+        if not isinstance(option, dict):
+            continue
+        label = str(option.get("label") or option.get("id") or "").strip()
+        if label:
+            labels.append(label)
+    return f" allowed values: {', '.join(labels)}" if labels else ""
 
 
 def is_verification_attribute(attribute_id: str, name: str) -> bool:
     key = "".join(char for char in f"{attribute_id} {name}".lower() if char.isalnum())
-    return "verification" in key and ("criteria" in key or "criterion" in key)
+    return "verification" in key and (
+        "criteria" in key
+        or "criterion" in key
+        or "method" in key
+        or "measure" in key
+        or "domain" in key
+    )
 
 
 def parse_agent_response(response: str) -> dict[str, object]:
@@ -325,7 +349,7 @@ def parse_agent_response(response: str) -> dict[str, object]:
         raise AgentBackendError("The LLM backend response is missing human-readable markdown.")
     if not isinstance(edits, list):
         raise AgentBackendError("The LLM backend response is missing machine-readable edits.")
-    clean_edits: list[dict[str, str]] = []
+    clean_edits: list[dict[str, object]] = []
     for edit in edits:
         if not isinstance(edit, dict):
             raise AgentBackendError("The LLM backend returned an invalid edit entry.")
@@ -334,17 +358,22 @@ def parse_agent_response(response: str) -> dict[str, object]:
         attribute_name = str(edit.get("attributeName", "")).strip()
         value_markdown = str(edit.get("valueMarkdown", "")).strip()
         value_xhtml = str(edit.get("valueXhtml", "")).strip()
-        if not (object_id and (attribute_id or attribute_name) and (value_markdown or value_xhtml)):
+        value_enum_raw = edit.get("valueEnum")
+        value_enum = []
+        if isinstance(value_enum_raw, list):
+            value_enum = [str(item).strip() for item in value_enum_raw if str(item).strip()]
+        if not (object_id and (attribute_id or attribute_name) and (value_markdown or value_xhtml or value_enum)):
             raise AgentBackendError("The LLM backend returned an incomplete edit entry.")
-        clean_edits.append(
-            {
-                "objectId": object_id,
-                "attributeId": attribute_id,
-                "attributeName": attribute_name,
-                "valueMarkdown": value_markdown,
-                "valueXhtml": value_xhtml,
-            }
-        )
+        clean_edit: dict[str, object] = {
+            "objectId": object_id,
+            "attributeId": attribute_id,
+            "attributeName": attribute_name,
+            "valueMarkdown": value_markdown,
+            "valueXhtml": value_xhtml,
+        }
+        if value_enum:
+            clean_edit["valueEnum"] = value_enum
+        clean_edits.append(clean_edit)
     return {"markdown": markdown.strip(), "edits": clean_edits}
 
 

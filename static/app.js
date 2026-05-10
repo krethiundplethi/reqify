@@ -12,6 +12,7 @@ const state = {
   selectedHistoryIndex: 0,
   agentSuggestion: null,
   localModifiedObjectIds: new Set(),
+  dirtyAttributeIds: new Set(),
   comparisonModifiedObjectIds: new Set(),
   selectedHistoryObjects: null,
   editorCursor: null,
@@ -46,6 +47,9 @@ const els = {
   agentApplyNext: document.getElementById("agentApplyNext"),
   agentResponse: document.getElementById("agentResponse"),
   agentPreview: document.getElementById("agentPreview"),
+  operationOverlay: document.getElementById("operationOverlay"),
+  operationMessage: document.getElementById("operationMessage"),
+  operationDialog: document.querySelector(".operation-dialog"),
   diffModal: document.getElementById("diffModal"),
   diffTitle: document.getElementById("diffTitle"),
   diffText: document.getElementById("diffText"),
@@ -236,6 +240,7 @@ function ingest(payload) {
   state.selectedHistoryIndex = 0;
   state.agentSuggestion = null;
   state.localModifiedObjectIds = new Set();
+  state.dirtyAttributeIds = new Set();
   state.comparisonModifiedObjectIds = new Set();
   state.selectedHistoryObjects = null;
   if (uiState.documentFilters && typeof uiState.documentFilters === "object") {
@@ -360,10 +365,53 @@ async function apiJson(url, options = {}) {
   return payload;
 }
 
-function markDirty(objectId = null) {
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function showOperation(message) {
+  els.operationMessage.textContent = message;
+  els.operationOverlay.hidden = false;
+  document.querySelector(".topbar").inert = true;
+  document.querySelector(".layout").inert = true;
+  els.operationDialog.focus();
+}
+
+function hideOperation() {
+  els.operationOverlay.hidden = true;
+  document.querySelector(".topbar").inert = false;
+  document.querySelector(".layout").inert = false;
+}
+
+async function waitForJob(jobId) {
+  for (;;) {
+    const payload = await apiJson(`/api/job/${encodeURIComponent(jobId)}`);
+    if (payload.status === "done") return payload.result;
+    if (payload.status === "error") throw new Error(payload.error || "Operation failed.");
+    await delay(500);
+  }
+}
+
+async function runAsyncOperation(startOperation, message) {
+  showOperation(message);
+  try {
+    const started = await startOperation();
+    if (!started?.jobId) return started;
+    return await waitForJob(started.jobId);
+  } finally {
+    hideOperation();
+  }
+}
+
+function dirtyAttributeKey(objectId, attrId) {
+  return `${objectId}\u0000${attrId}`;
+}
+
+function markDirty(objectId = null, attrId = null) {
   state.dirty = true;
   if (objectId) {
     state.localModifiedObjectIds.add(objectId);
+    if (attrId) state.dirtyAttributeIds.add(dirtyAttributeKey(objectId, attrId));
     if (state.selectedHistoryObjects) recomputeComparisonModifiedObjectIds();
     updateDocumentModificationState(objectId);
   }
@@ -380,8 +428,8 @@ function isViewingHead() {
 }
 
 function updateSaveState() {
-  els.saveButton.disabled = !isViewingHead();
-  els.saveButton.title = isViewingHead() ? "Commit edits" : "Checkout HEAD before saving";
+  els.saveButton.disabled = !isViewingHead() || !state.dirty;
+  els.saveButton.title = !isViewingHead() ? "Checkout HEAD before saving" : state.dirty ? "Commit edits" : "No edits to save";
 }
 
 function effectiveModifiedObjectIds() {
@@ -418,9 +466,21 @@ function reqifTextAttr(object) {
   return object.attributes.find(isReqifText);
 }
 
-function isVerificationCriteria(attr) {
+function verificationFieldKind(attr) {
   const key = attrKey(attr);
-  return key.includes("verification") && (key.includes("criteria") || key.includes("criterion"));
+  if (!key.includes("verification")) return "";
+  if (key.includes("criteria") || key.includes("criterion")) return "criteria";
+  if (key.includes("method") || key.includes("measure")) return "method";
+  if (key.includes("domain")) return "domain";
+  return "";
+}
+
+function isVerificationCriteria(attr) {
+  return verificationFieldKind(attr) === "criteria";
+}
+
+function isVerificationField(attr) {
+  return Boolean(verificationFieldKind(attr));
 }
 
 function isEmptyAttributeValue(value) {
@@ -428,8 +488,8 @@ function isEmptyAttributeValue(value) {
   return !plainText(value);
 }
 
-function hasEmptyOrNoVerificationCriteria(object) {
-  const verificationAttrs = object.attributes.filter(isVerificationCriteria);
+function hasIncompleteVerificationFields(object) {
+  const verificationAttrs = object.attributes.filter(isVerificationField);
   return !verificationAttrs.length || verificationAttrs.some((attr) => attr.missing || isEmptyAttributeValue(attr.value));
 }
 
@@ -492,6 +552,15 @@ function renderAgentPreview(edits = agentEditsForSelection()) {
           edit.valueXhtml = escapeHtml(edit.valueMarkdown);
         }),
       );
+    } else if (attr && isVerificationCriteria(attr)) {
+      const textarea = document.createElement("textarea");
+      textarea.className = "text-input multiline-input";
+      textarea.value = nextValue;
+      textarea.addEventListener("input", () => {
+        edit.valueMarkdown = textarea.value;
+        edit.valueXhtml = plainTextToXhtml(textarea.value);
+      });
+      row.appendChild(textarea);
     } else {
       const editor = renderXhtmlEditor(edit.objectId || state.selectedId || "", { id: edit.attributeId || attr?.id || "", value: nextValue, editable: true }, "agent preview");
       const editable = editor.querySelector(".xhtml-editor");
@@ -511,7 +580,7 @@ function updateAttribute(objectId, attrId, value) {
   if (!attr || attr.value === value) return;
   attr.value = value;
   state.objects[objectId].title = computeTitle(state.objects[objectId]);
-  markDirty(objectId);
+  markDirty(objectId, attrId);
 }
 
 function computeTitle(object) {
@@ -599,7 +668,7 @@ function shouldShowDocumentObject(objectId) {
   if (!object || !reqifTextAttr(object)) return false;
   if (state.documentFilters.modified && !effectiveModifiedObjectIds().has(objectId)) return false;
   if (state.documentFilters.requirements && objectKind(object) !== "requirement") return false;
-  if (state.documentFilters.emptyVerificationCriteria && !hasEmptyOrNoVerificationCriteria(object)) return false;
+  if (state.documentFilters.emptyVerificationCriteria && !hasIncompleteVerificationFields(object)) return false;
   return true;
 }
 
@@ -612,6 +681,46 @@ function documentFilterCounts() {
 function renderDocumentFilterCount() {
   const { shown, total } = documentFilterCounts();
   els.documentFilterCount.textContent = `Showing ${shown} filtered of ${total} items`;
+}
+
+function visibleDocumentObjectIds() {
+  return state.documentOrder.filter(shouldShowDocumentObject);
+}
+
+function nearestVisibleDocumentObjectId(objectId) {
+  const visible = visibleDocumentObjectIds();
+  if (!visible.length) return null;
+  if (visible.includes(objectId)) return objectId;
+  const start = state.documentOrder.indexOf(objectId);
+  if (start < 0) return visible[0];
+  let best = visible[0];
+  let bestDistance = Infinity;
+  visible.forEach((candidateId) => {
+    const distance = Math.abs(state.documentOrder.indexOf(candidateId) - start);
+    if (distance < bestDistance) {
+      best = candidateId;
+      bestDistance = distance;
+    }
+  });
+  return best;
+}
+
+function recoverDocumentSelection(previousSelection) {
+  const nextSelection = nearestVisibleDocumentObjectId(previousSelection);
+  if (!nextSelection) {
+    renderTree();
+    renderAttributes();
+    updateAgentApplyState();
+    return;
+  }
+  if (state.selectedId !== nextSelection) {
+    state.selectedId = nextSelection;
+    state.editorCursor = state.editorCursor?.objectId === nextSelection ? state.editorCursor : null;
+    renderTree();
+    renderAttributes();
+    updateAgentApplyState();
+  }
+  document.querySelector(`.document-item[data-object-id="${CSS.escape(nextSelection)}"]`)?.scrollIntoView({ block: "nearest" });
 }
 
 function outlineLevel(objectId) {
@@ -739,9 +848,11 @@ function renderAttributeBlock(objectId, attr, origin) {
   } else if (attr.type === "xhtml") {
     block.appendChild(renderXhtmlEditor(objectId, attr, origin));
   } else if (attr.editable) {
-    const input = document.createElement("input");
-    input.className = "text-input";
+    const input = document.createElement(isVerificationCriteria(attr) ? "textarea" : "input");
+    input.className = `text-input${isVerificationCriteria(attr) ? " multiline-input" : ""}`;
     input.value = attr.value || "";
+    input.dataset.objectId = objectId;
+    input.dataset.attrId = attr.id;
     input.addEventListener("input", () => {
       updateAttribute(objectId, attr.id, input.value);
       syncEditors(objectId, attr.id, input.value, input);
@@ -1231,20 +1342,27 @@ async function checkoutHistory(index) {
   if (!state.sessionId || !state.history[index]) return;
   if (state.dirty && !confirm("Discard unsaved changes and load this commit?")) return;
   setStatus("Loading commit...");
-  const payload = await apiJson(`/api/session/${state.sessionId}/checkout`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ commit: state.history[index].hash }),
-  });
-  ingest(payload);
-  state.historyIndex = index;
-  state.selectedHistoryIndex = index;
-  state.selectedHistoryObjects = null;
-  state.comparisonModifiedObjectIds = new Set();
-  renderHistory();
-  renderDocument();
-  updateSaveState();
-  setStatus(`${state.fileName} · ${state.history[index].short}`);
+  try {
+    const payload = await runAsyncOperation(
+      () => apiJson(`/api/session/${state.sessionId}/checkout`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ commit: state.history[index].hash }),
+      }),
+      "Loading commit...",
+    );
+    ingest(payload);
+    state.historyIndex = index;
+    state.selectedHistoryIndex = index;
+    state.selectedHistoryObjects = null;
+    state.comparisonModifiedObjectIds = new Set();
+    renderHistory();
+    renderDocument();
+    updateSaveState();
+    setStatus(`${state.fileName} · ${state.history[index].short}`);
+  } catch (error) {
+    setStatus(error.message, true);
+  }
 }
 
 els.fileInput.addEventListener("change", async () => {
@@ -1254,10 +1372,10 @@ els.fileInput.addEventListener("change", async () => {
   formData.append("file", file);
   setStatus("Loading...");
   try {
-    const payload = await apiJson("/api/load", { method: "POST", body: formData });
+    const payload = await runAsyncOperation(() => apiJson("/api/load", { method: "POST", body: formData }), "Loading ReqIF...");
     ingest(payload);
   } catch (error) {
-    setStatus(error.message);
+    setStatus(error.message, true);
   } finally {
     els.fileInput.value = "";
   }
@@ -1266,19 +1384,23 @@ els.fileInput.addEventListener("change", async () => {
 els.saveButton.addEventListener("click", async () => {
   if (!state.sessionId) return;
   const updates = {};
-  Object.values(state.objects).forEach((object) => {
-    updates[object.id] = {};
-    object.attributes.forEach((attr) => {
-      updates[object.id][attr.id] = { value: attr.value };
-    });
+  state.dirtyAttributeIds.forEach((key) => {
+    const [objectId, attrId] = key.split("\u0000");
+    const attr = getAttribute(objectId, attrId);
+    if (!attr) return;
+    updates[objectId] ||= {};
+    updates[objectId][attrId] = { value: attr.value };
   });
   setStatus("Saving...");
   try {
-    const payload = await apiJson(`/api/session/${state.sessionId}/save`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ objects: updates, viewedCommit: viewedCommit(), uiState: captureUiState() }),
-    });
+    const payload = await runAsyncOperation(
+      () => apiJson(`/api/session/${state.sessionId}/save`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ objects: updates, viewedCommit: viewedCommit(), uiState: captureUiState() }),
+      }),
+      "Saving changes...",
+    );
     ingest(payload);
     setStatus(payload.committed ? `${state.fileName} · committed` : `${state.fileName} · unchanged`);
   } catch (error) {
@@ -1286,9 +1408,20 @@ els.saveButton.addEventListener("click", async () => {
   }
 });
 
-els.exportButton.addEventListener("click", () => {
+els.exportButton.addEventListener("click", async () => {
   if (!state.sessionId) return;
-  window.location.href = `/api/session/${state.sessionId}/export`;
+  setStatus("Exporting...");
+  try {
+    const payload = await runAsyncOperation(
+      () => apiJson(`/api/session/${state.sessionId}/export`, { method: "POST" }),
+      "Preparing export...",
+    );
+    if (!payload?.downloadUrl) throw new Error("Export did not produce a download.");
+    window.location.href = payload.downloadUrl;
+    setStatus(`${state.fileName} · export ready`);
+  } catch (error) {
+    setStatus(error.message, true);
+  }
 });
 
 async function analyzeWithAgent() {
@@ -1332,7 +1465,7 @@ function isAgentEdit(edit) {
     typeof edit.objectId === "string" &&
     typeof edit.attributeId === "string" &&
     typeof edit.attributeName === "string" &&
-    (typeof edit.valueMarkdown === "string" || typeof edit.valueXhtml === "string")
+    (typeof edit.valueMarkdown === "string" || typeof edit.valueXhtml === "string" || Array.isArray(edit.valueEnum))
   );
 }
 
@@ -1380,6 +1513,8 @@ function findEditableAttribute(object, edit) {
 function comparableAttributeName(value) {
   const key = String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
   if (key.includes("verification") && (key.includes("criteria") || key.includes("criterion"))) return "verificationcriteria";
+  if (key.includes("verification") && (key.includes("method") || key.includes("measure"))) return "verificationmethod";
+  if (key.includes("verification") && key.includes("domain")) return "verificationdomain";
   return key;
 }
 
@@ -1428,7 +1563,8 @@ function agentEditValueForAttribute(attr, edit) {
     return sanitizeXhtmlFragment(edit.valueXhtml);
   }
   if (attr.type === "enumeration") return enumValuesFromAgentEdit(attr, edit);
-  return plainText(markdownToXhtml(edit.valueMarkdown || edit.valueXhtml));
+  const html = edit.valueMarkdown ? markdownToXhtml(edit.valueMarkdown) : sanitizeXhtmlFragment(edit.valueXhtml);
+  return richTextToPlainText(html);
 }
 
 function selectNextRequirement(currentObjectId) {
@@ -1463,8 +1599,10 @@ function focusDocumentEditor(objectId) {
 
 function bindDocumentFilter(input, key) {
   input.addEventListener("change", () => {
+    const previousSelection = state.selectedId;
     state.documentFilters[key] = input.checked;
     renderDocument();
+    recoverDocumentSelection(previousSelection);
   });
 }
 

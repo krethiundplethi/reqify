@@ -4,7 +4,6 @@ import hashlib
 import io
 import json
 import re
-import subprocess
 import tempfile
 import uuid
 import zipfile
@@ -12,12 +11,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import DATA_DIR, ensure_dirs, safe_name
-from .git_repo import commit_repo, init_repo, run_git
+from .git_repo import commit_repo, init_repo, run_git, run_git_bytes
 from .reqif_document import ReqifDocument
 from .xml_utils import attribute_key, strip_markup
 
 
 UI_STATE_REL = ".reqify-state.json"
+EXPORTS_DIR = "exports"
 
 
 def safe_extract(zip_file: zipfile.ZipFile, target: Path) -> None:
@@ -140,6 +140,8 @@ def existing_session_for_source(source_hash: str) -> str | None:
     matches: list[tuple[str, str]] = []
     for meta_path in DATA_DIR.glob("*/session.json"):
         session_id = meta_path.parent.name
+        if not re.fullmatch(r"[a-f0-9]{32}", session_id):
+            continue
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             meta_hash = str(meta.get("sourceSha256") or "")
@@ -166,13 +168,7 @@ def legacy_source_sha256(session_id: str, meta: dict[str, object]) -> str:
     if root.returncode != 0 or not root.stdout.strip():
         return ""
     first_commit = root.stdout.splitlines()[0].strip()
-    document = subprocess.run(
-        ["git", "show", f"{first_commit}:{document_rel}"],
-        cwd=repo,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
+    document = run_git_bytes(repo, "show", f"{first_commit}:{document_rel}", check=False)
     if document.returncode != 0:
         return ""
     return hashlib.sha256(document.stdout).hexdigest()
@@ -224,9 +220,10 @@ def save_session(session_id: str, updates: dict[str, object], viewed_commit: str
     current_head = head_commit(session_id)
     if current_head and viewed_commit != current_head:
         raise ValueError("Save is only allowed while viewing HEAD. Checkout the latest commit before saving.")
-    document = ReqifDocument(document_path(session_id))
-    document.apply_updates(updates)
-    document.write()
+    if updates:
+        document = ReqifDocument(document_path(session_id))
+        document.apply_updates(updates)
+        document.write()
     if ui_state is not None:
         write_ui_state(session_id, ui_state)
     committed = commit_repo(repo_dir(session_id), f"Save edits {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -298,3 +295,44 @@ def export_session(session_id: str) -> tuple[str, bytes, str]:
         return export_name, export_path.read_bytes(), "application/zip"
     export_name = edited_export_name(original_name, ".reqif")
     return export_name, document_path(session_id).read_bytes(), "application/xml"
+
+
+def export_artifact_dir(session_id: str) -> Path:
+    return session_dir(session_id) / EXPORTS_DIR
+
+
+def create_export_artifact(session_id: str) -> dict[str, str]:
+    export_name, body, content_type = export_session(session_id)
+    export_id = uuid.uuid4().hex
+    target = export_artifact_dir(session_id)
+    target.mkdir(parents=True, exist_ok=True)
+    (target / f"{export_id}.bin").write_bytes(body)
+    (target / f"{export_id}.json").write_text(
+        json.dumps(
+            {
+                "name": export_name,
+                "contentType": content_type,
+                "createdAt": datetime.now(timezone.utc).isoformat(),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "downloadUrl": f"/api/session/{session_id}/export/{export_id}",
+        "fileName": export_name,
+    }
+
+
+def load_export_artifact(session_id: str, export_id: str) -> tuple[str, bytes, str]:
+    if not re.fullmatch(r"[a-f0-9]{32}", export_id):
+        raise ValueError("Invalid export id")
+    target = export_artifact_dir(session_id)
+    meta_path = target / f"{export_id}.json"
+    body_path = target / f"{export_id}.bin"
+    if not meta_path.is_file() or not body_path.is_file():
+        raise ValueError("Export not found")
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    name = str(meta.get("name") or "export.reqif")
+    content_type = str(meta.get("contentType") or "application/octet-stream")
+    return name, body_path.read_bytes(), content_type
