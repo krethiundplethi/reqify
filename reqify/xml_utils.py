@@ -50,8 +50,12 @@ def browser_html_fragment(element: ET.Element) -> str:
     tag = local_name(element.tag)
     attrs = "".join(f' {local_name(name)}="{html.escape(value, quote=True)}"' for name, value in element.attrib.items())
     parts: list[str] = []
-    if tag.lower() in VOID_TAGS and not list(element) and not element.text:
+    if tag.lower() in VOID_TAGS:
         parts.append(f"<{tag}{attrs}>")
+        if element.text:
+            parts.append(html.escape(element.text))
+        for child in list(element):
+            parts.append(browser_html_fragment(child))
     else:
         parts.append(f"<{tag}{attrs}>")
         if element.text:
@@ -121,12 +125,24 @@ def parse_xhtml_fragment(fragment: str) -> ET.Element:
     return ET.fromstring(wrapped)
 
 
+def xhtml_value_div(fragment: str) -> ET.Element | None:
+    normalized = normalize_fragment(fragment)
+    if not normalized.strip():
+        return None
+    wrapper = ET.fromstring(f'<div xmlns="{XHTML_NS}">{normalized}</div>')
+    children = list(wrapper)
+    if not (wrapper.text or "").strip() and len(children) == 1 and local_name(children[0].tag) == "div" and not (children[0].tail or "").strip():
+        child = children[0]
+        wrapper.remove(child)
+        child.tail = None
+        return child
+    return wrapper
+
+
 def replace_xhtml_value(the_value: ET.Element, fragment: str) -> None:
     tail = the_value.tail
     the_value.clear()
     the_value.tail = tail
-    wrapper = parse_xhtml_fragment(fragment)
-    the_value.text = wrapper.text
-    for child in list(wrapper):
-        wrapper.remove(child)
-        the_value.append(child)
+    div = xhtml_value_div(fragment)
+    if div is not None:
+        the_value.append(div)
