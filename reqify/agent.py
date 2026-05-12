@@ -13,6 +13,7 @@ from urllib.parse import quote, urlparse
 from urllib.request import Request as UrlRequest
 from urllib.request import urlopen
 
+from .attachment_preview import excel_attachment_prompt_context
 from .xml_utils import attribute_key, strip_markup
 
 
@@ -44,11 +45,11 @@ AGENT_RESPONSE_SCHEMA: dict[str, object] = {
                     "objectId": {"type": "string"},
                     "attributeId": {"type": "string"},
                     "attributeName": {"type": "string"},
-                    "valueMarkdown": {"type": "string"},
                     "valueXhtml": {"type": "string"},
                     "valueEnum": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["objectId", "attributeId", "attributeName"],
+                "anyOf": [{"required": ["valueXhtml"]}, {"required": ["valueEnum"]}],
                 "additionalProperties": False,
             },
         },
@@ -65,7 +66,6 @@ STRUCTURED_RESPONSE_INSTRUCTIONS = """Return only JSON matching this schema:
       "objectId": "selected ReqIF object id",
       "attributeId": "exact attribute id from the selected item context",
       "attributeName": "exact attribute name from the selected item context",
-      "valueMarkdown": "complete replacement value in markdown",
       "valueXhtml": "complete replacement value as XHTML fragment",
       "valueEnum": ["for enumeration fields only, selected option labels or ids"]
     }
@@ -78,6 +78,9 @@ Do not use numeric scores, letter grades, well_formed, or multiple ratings.
 No positive feedback, no risk section, no discussion.
 Include edits for requirement text and verification fields when any needs improvement and the field exists.
 For enumeration fields, use valueEnum with allowed option labels or ids from context.
+For text fields, use valueXhtml with the complete replacement as an XHTML fragment.
+For plain non-XHTML fields, still use valueXhtml; the client converts it to plain text.
+Do not use Markdown inside edit values. Use <br/> for line breaks in valueXhtml.
 Use edits only for fields where you propose a concrete replacement.
 Preserve the full intended field value, not a diff."""
 
@@ -222,6 +225,14 @@ def print_llm_prompts(backend: str, model: str, system_prompt: str, user_input: 
     print("=== end Reqify LLM prompt debug ===\n", file=sys.stderr)
 
 
+def print_llm_response(response: str) -> None:
+    if not debug_enabled():
+        return
+    print("\n=== Reqify LLM response debug ===", file=sys.stderr)
+    print(response.strip(), file=sys.stderr)
+    print("=== end Reqify LLM response debug ===\n", file=sys.stderr)
+
+
 def backend_from_config() -> AgentBackend:
     backend_name = os.environ.get("REQIFY_AGENT_BACKEND", "local").strip().lower()
     if backend_name == "local":
@@ -236,6 +247,7 @@ def backend_from_config() -> AgentBackend:
 def analyze_agent(request: AgentRequest) -> dict[str, object]:
     backend = backend_from_config()
     response = backend.analyze(agent_instructions(), request).strip()
+    print_llm_response(response)
     if not response:
         raise AgentBackendError("The LLM backend returned an empty response.")
     structured = parse_agent_response(response)
@@ -251,6 +263,9 @@ def compose_user_input(request: AgentRequest) -> str:
     object_summary = summarize_object(request.selected_object)
     if not object_summary:
         return user_prompt
+    attachment_summary = excel_attachment_prompt_context(request.session_id, request.selected_object)
+    if attachment_summary:
+        return f"{user_prompt}\n\nSelected item context:\n{object_summary}\n\n{attachment_summary}"
     return f"{user_prompt}\n\nSelected item context:\n{object_summary}"
 
 
@@ -356,19 +371,17 @@ def parse_agent_response(response: str) -> dict[str, object]:
         object_id = str(edit.get("objectId", "")).strip()
         attribute_id = str(edit.get("attributeId", "")).strip()
         attribute_name = str(edit.get("attributeName", "")).strip()
-        value_markdown = str(edit.get("valueMarkdown", "")).strip()
         value_xhtml = str(edit.get("valueXhtml", "")).strip()
         value_enum_raw = edit.get("valueEnum")
         value_enum = []
         if isinstance(value_enum_raw, list):
             value_enum = [str(item).strip() for item in value_enum_raw if str(item).strip()]
-        if not (object_id and (attribute_id or attribute_name) and (value_markdown or value_xhtml or value_enum)):
+        if not (object_id and (attribute_id or attribute_name) and (value_xhtml or value_enum)):
             raise AgentBackendError("The LLM backend returned an incomplete edit entry.")
         clean_edit: dict[str, object] = {
             "objectId": object_id,
             "attributeId": attribute_id,
             "attributeName": attribute_name,
-            "valueMarkdown": value_markdown,
             "valueXhtml": value_xhtml,
         }
         if value_enum:

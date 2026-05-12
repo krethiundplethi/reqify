@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import html
 import re
 from pathlib import Path
@@ -35,19 +36,21 @@ def qualified_like(element: ET.Element, name: str) -> str:
     return name
 
 
-def element_inner_xml(element: ET.Element | None) -> str:
+def element_inner_xml(element: ET.Element | None, convert_objects: bool = True) -> str:
     if element is None:
         return ""
     parts: list[str] = []
     if element.text:
         parts.append(html.escape(element.text))
     for child in list(element):
-        parts.append(browser_html_fragment(child))
+        parts.append(browser_html_fragment(child, convert_objects))
     return "".join(parts)
 
 
-def browser_html_fragment(element: ET.Element) -> str:
+def browser_html_fragment(element: ET.Element, convert_objects: bool = True) -> str:
     tag = local_name(element.tag)
+    if convert_objects and tag.lower() == "object" and element.get("data"):
+        return attachment_object_fragment(element)
     attrs = "".join(f' {local_name(name)}="{html.escape(value, quote=True)}"' for name, value in element.attrib.items())
     parts: list[str] = []
     if tag.lower() in VOID_TAGS:
@@ -55,17 +58,48 @@ def browser_html_fragment(element: ET.Element) -> str:
         if element.text:
             parts.append(html.escape(element.text))
         for child in list(element):
-            parts.append(browser_html_fragment(child))
+            parts.append(browser_html_fragment(child, convert_objects))
     else:
         parts.append(f"<{tag}{attrs}>")
         if element.text:
             parts.append(html.escape(element.text))
         for child in list(element):
-            parts.append(browser_html_fragment(child))
+            parts.append(browser_html_fragment(child, convert_objects))
         parts.append(f"</{tag}>")
     if element.tail:
         parts.append(html.escape(element.tail))
     return "".join(parts)
+
+
+def attachment_object_fragment(element: ET.Element) -> str:
+    data = element.get("data") or ""
+    name = element.get("name") or ""
+    content_type = element.get("type") or ""
+    fallback = element_inner_xml(element, convert_objects=False)
+    label = name or basename(data) or strip_markup(fallback) or "Attachment"
+    fallback_encoded = base64.b64encode(fallback.encode("utf-8")).decode("ascii")
+    attrs = {
+        "data-reqif-xhtml-object": "1",
+        "data-reqif-object-data": data,
+        "data-reqif-object-name": name,
+        "data-reqif-object-type": content_type,
+        "data-reqif-object-fallback": fallback_encoded,
+        "contenteditable": "false",
+        "class": "reqif-attachment",
+    }
+    attr_text = "".join(f' {key}="{html.escape(value, quote=True)}"' for key, value in attrs.items())
+    link_title = f"Download {label}"
+    return (
+        f"<span{attr_text}>"
+        f'<a data-reqif-object-link="1" href="#" title="{html.escape(link_title, quote=True)}">'
+        f"{html.escape(label)}"
+        "</a></span>"
+        + (html.escape(element.tail) if element.tail else "")
+    )
+
+
+def basename(path: str) -> str:
+    return re.split(r"[\\/]", path)[-1] if path else ""
 
 
 def collect_namespaces(xml_path: Path) -> None:
@@ -110,6 +144,7 @@ def direct_container(parent: ET.Element, name: str) -> ET.Element | None:
 
 
 def normalize_fragment(fragment: str) -> str:
+    fragment = restore_attachment_object_markers(fragment)
     fragment = fragment.replace("&nbsp;", "&#160;")
     fragment = re.sub(r'\s+xmlns(?::[A-Za-z_][\w.-]*)?="[^"]*"', "", fragment)
     fragment = re.sub(r"</?(?:xhtml|html):", lambda match: match.group(0).replace("xhtml:", "").replace("html:", ""), fragment)
@@ -118,6 +153,43 @@ def normalize_fragment(fragment: str) -> str:
         fragment = re.sub(rf"<{tag}([^>/]*?)>", rf"<{tag}\1 />", fragment, flags=re.IGNORECASE)
         fragment = re.sub(rf"</{tag}>", "", fragment, flags=re.IGNORECASE)
     return fragment
+
+
+def restore_attachment_object_markers(fragment: str) -> str:
+    pattern = re.compile(
+        r"<span\b(?=[^>]*\bdata-reqif-xhtml-object\s*=\s*['\"]1['\"])(?P<attrs>[^>]*)>(?P<body>.*?)</span>",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return pattern.sub(lambda match: restored_attachment_object(match.group("attrs"), match.group("body")), fragment)
+
+
+def restored_attachment_object(attrs_text: str, body: str) -> str:
+    attrs = html_attrs(attrs_text)
+    data = attrs.get("data-reqif-object-data", "")
+    name = attrs.get("data-reqif-object-name", "")
+    content_type = attrs.get("data-reqif-object-type", "")
+    fallback = decode_base64_text(attrs.get("data-reqif-object-fallback", ""))
+    if not fallback:
+        fallback = html.escape(strip_markup(body) or name or basename(data) or "Attachment")
+    object_attrs = {"data": data, "name": name, "type": content_type}
+    attr_text = "".join(f' {key}="{html.escape(value, quote=True)}"' for key, value in object_attrs.items() if value)
+    return f"<object{attr_text}>{fallback}</object>"
+
+
+def html_attrs(attrs_text: str) -> dict[str, str]:
+    attrs: dict[str, str] = {}
+    for match in re.finditer(r"([A-Za-z_:][\w:.-]*)\s*=\s*(\"([^\"]*)\"|'([^']*)')", attrs_text):
+        attrs[match.group(1).lower()] = html.unescape(match.group(3) if match.group(3) is not None else match.group(4) or "")
+    return attrs
+
+
+def decode_base64_text(value: str) -> str:
+    if not value:
+        return ""
+    try:
+        return base64.b64decode(value.encode("ascii"), validate=True).decode("utf-8")
+    except Exception:
+        return ""
 
 
 def parse_xhtml_fragment(fragment: str) -> ET.Element:

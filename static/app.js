@@ -130,7 +130,47 @@ function markdownToXhtml(markdown) {
 function sanitizeXhtmlFragment(value) {
   const template = document.createElement("template");
   template.innerHTML = String(value || "");
-  const allowedTags = new Set(["B", "BR", "CODE", "DIV", "EM", "I", "LI", "OL", "P", "STRONG", "U", "UL"]);
+  const allowedTags = new Set([
+    "B",
+    "BR",
+    "CAPTION",
+    "CODE",
+    "COL",
+    "COLGROUP",
+    "DIV",
+    "EM",
+    "I",
+    "LI",
+    "OL",
+    "P",
+    "STRONG",
+    "TABLE",
+    "TBODY",
+    "TD",
+    "TFOOT",
+    "TH",
+    "THEAD",
+    "TR",
+    "U",
+    "UL",
+  ]);
+  const tableTags = new Set(["COL", "COLGROUP", "TD", "TH"]);
+  const tableAttributeNames = new Set(["colspan", "rowspan", "scope", "span"]);
+  const validTableAttribute = (element, name, attrValue) => {
+    if (!tableTags.has(element.tagName)) return false;
+    const normalized = String(attrValue || "").trim();
+    if (name === "colspan" || name === "rowspan") return ["TD", "TH"].includes(element.tagName) && /^[1-9]\d*$/.test(normalized);
+    if (name === "scope") return element.tagName === "TH" && ["col", "row", "colgroup", "rowgroup"].includes(normalized.toLowerCase());
+    if (name === "span") return ["COL", "COLGROUP"].includes(element.tagName) && /^[1-9]\d*$/.test(normalized);
+    return false;
+  };
+  const cleanAttributes = (element) => {
+    [...element.attributes].forEach((attr) => {
+      const name = attr.name.toLowerCase();
+      if (tableAttributeNames.has(name) && validTableAttribute(element, name, attr.value)) return;
+      element.removeAttribute(attr.name);
+    });
+  };
   const clean = (node) => {
     [...node.childNodes].forEach((child) => {
       if (child.nodeType === Node.TEXT_NODE) return;
@@ -138,7 +178,7 @@ function sanitizeXhtmlFragment(value) {
         child.replaceWith(document.createTextNode(child.textContent || ""));
         return;
       }
-      [...child.attributes].forEach((attr) => child.removeAttribute(attr.name));
+      cleanAttributes(child);
       clean(child);
     });
   };
@@ -150,6 +190,26 @@ function plainText(value) {
   const div = document.createElement("div");
   div.innerHTML = value || "";
   return div.textContent.trim().replace(/\s+/g, " ");
+}
+
+function xhtmlToPlainText(value) {
+  const template = document.createElement("template");
+  template.innerHTML = String(value || "");
+  const parts = [];
+  const walk = (node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      parts.push(node.textContent || "");
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    if (node.tagName === "BR") {
+      parts.push("\n");
+      return;
+    }
+    [...node.childNodes].forEach(walk);
+  };
+  [...template.content.childNodes].forEach(walk);
+  return parts.join("").replace(/\r\n?/g, "\n").trim();
 }
 
 function richTextToPlainText(value) {
@@ -412,6 +472,23 @@ function startDownload(downloadUrl) {
   setTimeout(() => frame.remove(), 60000);
 }
 
+function attachmentDownloadUrl(path) {
+  if (!state.sessionId || !path) return "#";
+  return `/api/session/${state.sessionId}/attachment?path=${encodeURIComponent(path)}`;
+}
+
+function hydrateAttachmentLinks(root) {
+  root.querySelectorAll('[data-reqif-xhtml-object="1"]').forEach((chip) => {
+    chip.contentEditable = "false";
+    const dataPath = chip.dataset.reqifObjectData || "";
+    const link = chip.querySelector("[data-reqif-object-link]") || chip.querySelector("a");
+    if (!link) return;
+    link.href = attachmentDownloadUrl(dataPath);
+    link.setAttribute("download", chip.dataset.reqifObjectName || dataPath.split(/[\\/]/).pop() || "attachment");
+    link.addEventListener("click", (event) => event.stopPropagation());
+  });
+}
+
 function dirtyAttributeKey(objectId, attrId) {
   return `${objectId}\u0000${attrId}`;
 }
@@ -566,7 +643,7 @@ function renderAgentPreview(edits = agentEditsForSelection()) {
     const object = state.objects[edit.objectId || state.selectedId];
     const attr = object ? findEditableAttribute(object, edit) : null;
     const label = attr?.name || edit.attributeName || edit.attributeId || "Field";
-    const nextValue = attr ? agentEditValueForAttribute(attr, edit) : edit.valueMarkdown || edit.valueXhtml || "";
+    const nextValue = attr ? agentEditValueForAttribute(attr, edit) : edit.valueXhtml || "";
     const row = document.createElement("label");
     row.className = "agent-preview-edit";
     const name = document.createElement("div");
@@ -577,8 +654,7 @@ function renderAgentPreview(edits = agentEditsForSelection()) {
       row.appendChild(
         renderAgentEnumerationEditor(attr, nextValue, (value) => {
           edit.valueEnum = value;
-          edit.valueMarkdown = value.join(", ");
-          edit.valueXhtml = escapeHtml(edit.valueMarkdown);
+          edit.valueXhtml = escapeHtml(value.join(", "));
         }),
       );
     } else if (attr && isVerificationCriteria(attr)) {
@@ -586,18 +662,25 @@ function renderAgentPreview(edits = agentEditsForSelection()) {
       textarea.className = "text-input multiline-input";
       textarea.value = nextValue;
       textarea.addEventListener("input", () => {
-        edit.valueMarkdown = textarea.value;
         edit.valueXhtml = plainTextToXhtml(textarea.value);
       });
       row.appendChild(textarea);
     } else {
-      const editor = renderXhtmlEditor(edit.objectId || state.selectedId || "", { id: edit.attributeId || attr?.id || "", value: nextValue, editable: true }, "agent preview");
+      const editor = renderXhtmlEditor(
+        edit.objectId || state.selectedId || "",
+        { id: edit.attributeId || attr?.id || "", value: nextValue, editable: true },
+        "agent preview",
+        {
+          onChange: (value) => {
+            edit.valueXhtml = value;
+          },
+        },
+      );
       const editable = editor.querySelector(".xhtml-editor");
-      editable.addEventListener("input", () => {
+      if (editable) {
         const value = editable.innerHTML || "";
-        edit.valueMarkdown = plainText(value);
         edit.valueXhtml = value;
-      });
+      }
       row.appendChild(editor);
     }
     els.agentPreview.appendChild(row);
@@ -859,7 +942,7 @@ function renderAttributes() {
   }
   els.attributesView.className = "attributes-view";
   const object = state.objects[state.selectedId];
-  const attrs = object.attributes.filter((attr) => !isReqifText(attr));
+  const attrs = sortedAttributesForRendering(object, object.attributes.filter((attr) => !isReqifText(attr)));
   if (!attrs.length) {
     els.attributesView.className = "attributes-view empty-state";
     els.attributesView.textContent = "No attributes";
@@ -868,6 +951,25 @@ function renderAttributes() {
   attrs.forEach((attr) => {
     els.attributesView.appendChild(renderAttributeBlock(object.id, attr, "attributes"));
   });
+}
+
+function sortedAttributesForRendering(object, attrs) {
+  const positions = new Map();
+  (Array.isArray(object.attributeOrder) ? object.attributeOrder : []).forEach((attrId, index) => {
+    const key = String(attrId || "");
+    if (key && !positions.has(key)) positions.set(key, index);
+  });
+  return attrs
+    .map((attr, index) => {
+      const key = String(attr?.id || "");
+      return {
+        attr,
+        index,
+        position: positions.has(key) ? positions.get(key) : Number.MAX_SAFE_INTEGER,
+      };
+    })
+    .sort((left, right) => left.position - right.position || left.index - right.index)
+    .map((entry) => entry.attr);
 }
 
 function renderAttributeBlock(objectId, attr, origin) {
@@ -1075,7 +1177,7 @@ function renderAgentEnumerationEditor(attr, value, onChange) {
   return select;
 }
 
-function renderXhtmlEditor(objectId, attr, origin) {
+function renderXhtmlEditor(objectId, attr, origin, options = {}) {
   const shell = document.createElement("div");
   shell.className = "editor-shell";
   shell.innerHTML = `
@@ -1097,6 +1199,7 @@ function renderXhtmlEditor(objectId, attr, origin) {
   editor.dataset.attrId = attr.id;
   editor.dataset.origin = origin;
   editor.innerHTML = attr.value || "";
+  hydrateAttachmentLinks(editor);
   const showToolbar = () => {
     shell.classList.add("editing");
   };
@@ -1112,18 +1215,23 @@ function renderXhtmlEditor(objectId, attr, origin) {
   ["focus", "keyup", "mouseup", "input"].forEach((eventName) => {
     editor.addEventListener(eventName, () => captureEditorCursor(editor));
   });
-  editor.addEventListener("input", () => {
-    updateAttribute(objectId, attr.id, editor.innerHTML);
-    syncEditors(objectId, attr.id, editor.innerHTML, editor);
-  });
+  const applyEditorChange = () => {
+    const value = editor.innerHTML;
+    if (options.onChange) {
+      options.onChange(value, editor);
+      return;
+    }
+    updateAttribute(objectId, attr.id, value);
+    syncEditors(objectId, attr.id, value, editor);
+  };
+  editor.addEventListener("input", applyEditorChange);
   shell.appendChild(editor);
   shell.querySelectorAll("[data-command]").forEach((button) => {
     button.addEventListener("mousedown", (event) => event.preventDefault());
     button.addEventListener("click", () => {
       editor.focus();
       document.execCommand(button.dataset.command, false, null);
-      updateAttribute(objectId, attr.id, editor.innerHTML);
-      syncEditors(objectId, attr.id, editor.innerHTML, editor);
+      applyEditorChange();
       captureEditorCursor(editor);
     });
   });
@@ -1132,8 +1240,7 @@ function renderXhtmlEditor(objectId, attr, origin) {
   plainTextButton.addEventListener("click", () => {
     editor.focus();
     editor.innerHTML = plainTextToXhtml(richTextToPlainText(editor.innerHTML));
-    updateAttribute(objectId, attr.id, editor.innerHTML);
-    syncEditors(objectId, attr.id, editor.innerHTML, editor);
+    applyEditorChange();
     captureEditorCursor(editor);
   });
   return shell;
@@ -1144,6 +1251,7 @@ function syncEditors(objectId, attrId, value, source) {
     if (node === source) return;
     if (node.classList.contains("xhtml-editor")) {
       node.innerHTML = value;
+      hydrateAttachmentLinks(node);
     } else if ("value" in node) {
       node.value = value;
     }
@@ -1523,7 +1631,7 @@ function isAgentEdit(edit) {
     typeof edit.objectId === "string" &&
     typeof edit.attributeId === "string" &&
     typeof edit.attributeName === "string" &&
-    (typeof edit.valueMarkdown === "string" || typeof edit.valueXhtml === "string" || Array.isArray(edit.valueEnum))
+    (typeof edit.valueXhtml === "string" || Array.isArray(edit.valueEnum))
   );
 }
 
@@ -1587,9 +1695,7 @@ function enumEditCandidates(attr, edit) {
     const text = String(value || "").trim();
     if (text) candidates.push(text);
   };
-  add(edit.valueMarkdown);
-  add(plainText(markdownToXhtml(edit.valueMarkdown || "")));
-  add(plainText(edit.valueXhtml || ""));
+  add(xhtmlToPlainText(edit.valueXhtml || ""));
   if (edit.attributeId && edit.attributeId !== attr.id) add(edit.attributeId);
   return candidates
     .flatMap((candidate) => candidate.split(/[\n,;|]+/))
@@ -1617,12 +1723,10 @@ function enumValuesFromAgentEdit(attr, edit) {
 
 function agentEditValueForAttribute(attr, edit) {
   if (attr.type === "xhtml") {
-    if (edit.valueMarkdown) return markdownToXhtml(edit.valueMarkdown);
     return sanitizeXhtmlFragment(edit.valueXhtml);
   }
   if (attr.type === "enumeration") return enumValuesFromAgentEdit(attr, edit);
-  const html = edit.valueMarkdown ? markdownToXhtml(edit.valueMarkdown) : sanitizeXhtmlFragment(edit.valueXhtml);
-  return richTextToPlainText(html);
+  return xhtmlToPlainText(edit.valueXhtml);
 }
 
 function selectNextRequirement(currentObjectId) {

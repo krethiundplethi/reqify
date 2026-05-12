@@ -528,10 +528,49 @@ body.resizing {
   padding: 9px 10px;
   line-height: 1.45;
   outline: none;
+  overflow-x: auto;
 }
 
 .xhtml-editor:focus {
   box-shadow: inset 0 0 0 2px rgba(60, 130, 246, 0.2);
+}
+
+.xhtml-editor table {
+  max-width: 100%;
+  margin: 6px 0;
+  border-collapse: collapse;
+  border: 1px solid var(--line);
+}
+
+.xhtml-editor th,
+.xhtml-editor td {
+  min-width: 48px;
+  padding: 5px 7px;
+  border: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.xhtml-editor th {
+  background: var(--surface);
+  font-weight: 700;
+}
+
+.xhtml-editor caption {
+  padding: 4px 0;
+  color: var(--muted);
+  text-align: left;
+}
+
+.reqif-attachment {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  margin: 0 2px;
+}
+
+.reqif-attachment a {
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .text-input {

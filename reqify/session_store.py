@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import mimetypes
 import re
 import tempfile
 import uuid
@@ -348,3 +349,17 @@ def load_export_artifact(session_id: str, export_id: str) -> tuple[str, bytes, s
     name = str(meta.get("name") or "export.reqif")
     content_type = str(meta.get("contentType") or "application/octet-stream")
     return name, body_path.read_bytes(), content_type
+
+
+def load_attachment(session_id: str, rel_path: str) -> tuple[str, bytes, str]:
+    relative = Path(rel_path)
+    if relative.is_absolute() or ".." in relative.parts or ".git" in relative.parts:
+        raise ValueError("Invalid attachment path")
+    repo = repo_dir(session_id).resolve()
+    path = (repo / relative).resolve()
+    if path != repo and repo not in path.parents:
+        raise ValueError("Invalid attachment path")
+    if not path.is_file():
+        raise ValueError("Attachment not found")
+    content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return path.name, path.read_bytes(), content_type

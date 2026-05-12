@@ -4,13 +4,12 @@ import copy
 import io
 import re
 import tempfile
-import uuid
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from .reqif_document import ReqifDocument
-from .xml_utils import child_elements, descendant_text, direct_container, first_descendant, local_name, qualified_like
+from .xml_utils import child_elements, descendant_text, direct_container, first_descendant, local_name
 
 
 def edited_export_name(original_name: str, fallback_suffix: str) -> str:
@@ -92,7 +91,8 @@ def filter_document_to_objects(document: ReqifDocument, object_ids: list[str]) -
     if content is None:
         raise ValueError("ReqIF content not found.")
 
-    selected_set = set(selected_ids)
+    selected_id_set = set(selected_ids)
+    filter_specifications(content, selected_id_set)
     kept_objects = [document.spec_objects[object_id] for object_id in selected_ids]
     used_object_type_ids = {document._spec_object_type_ref(spec_object) for spec_object in kept_objects}
     used_attribute_ids: set[str] = set()
@@ -104,9 +104,6 @@ def filter_document_to_objects(document: ReqifDocument, object_ids: list[str]) -
             if not local_name(value_element.tag).startswith("ATTRIBUTE-VALUE"):
                 continue
             used_attribute_ids.add(document._attribute_ref(value_element))
-
-    filter_spec_objects(content, selected_ids)
-    filter_specifications(document, content, selected_ids)
 
     attribute_definitions = elements_by_identifier(document.root, "ATTRIBUTE-DEFINITION")
     used_attribute_ids.update(attribute_ids_for_type_elements(document.root, "SPEC-OBJECT-TYPE", used_object_type_ids))
@@ -123,8 +120,9 @@ def filter_document_to_objects(document: ReqifDocument, object_ids: list[str]) -
     filter_datatypes(content, used_datatype_ids)
     drop_container(content, "SPEC-RELATIONS")
     drop_container(content, "SPEC-RELATION-GROUPS")
-    document.spec_objects = {object_id: document.spec_objects[object_id] for object_id in selected_ids}
-    return referenced_file_paths(document, selected_set)
+    filter_spec_objects(content, selected_id_set)
+    document.spec_objects = {object_id: spec_object for object_id, spec_object in document.spec_objects.items() if object_id in selected_id_set}
+    return referenced_file_paths(document, selected_id_set)
 
 
 def referenced_file_paths(document: ReqifDocument, object_ids: set[str]) -> set[str]:
@@ -144,52 +142,52 @@ def referenced_file_paths(document: ReqifDocument, object_ids: set[str]) -> set[
     return references
 
 
-def filter_spec_objects(content: ET.Element, selected_ids: list[str]) -> None:
+def filter_spec_objects(content: ET.Element, retained_ids: set[str]) -> None:
     container = direct_container(content, "SPEC-OBJECTS")
     if container is None:
         return
-    by_id = {child.get("IDENTIFIER"): child for child in list(container) if local_name(child.tag) == "SPEC-OBJECT"}
     for child in list(container):
-        if local_name(child.tag) == "SPEC-OBJECT":
+        if local_name(child.tag) == "SPEC-OBJECT" and child.get("IDENTIFIER") not in retained_ids:
             container.remove(child)
-    for object_id in selected_ids:
-        element = by_id.get(object_id)
-        if element is not None:
-            container.append(element)
 
 
-def filter_specifications(document: ReqifDocument, content: ET.Element, selected_ids: list[str]) -> None:
+def filter_specifications(content: ET.Element, selected_ids: set[str]) -> None:
     container = direct_container(content, "SPECIFICATIONS")
     if container is None:
         return
     specifications = [child for child in list(container) if local_name(child.tag) == "SPECIFICATION"]
-    if not specifications:
-        return
-    source_spec = specifications[0]
-    source_hierarchies = hierarchies_by_object_ref(document.root)
-    flat_spec = copy.deepcopy(source_spec)
-    for child in list(flat_spec):
-        if local_name(child.tag) == "CHILDREN":
-            flat_spec.remove(child)
-    children = ET.Element(qualified_like(flat_spec, "CHILDREN"))
-    for object_id in selected_ids:
-        source_hierarchy = source_hierarchies.get(object_id)
-        if source_hierarchy is not None:
-            hierarchy = copy.deepcopy(source_hierarchy)
-            for child in list(hierarchy):
-                if local_name(child.tag) in {"OBJECT", "CHILDREN"}:
-                    hierarchy.remove(child)
-        else:
-            hierarchy = ET.Element(qualified_like(children, "SPEC-HIERARCHY"), {"IDENTIFIER": uuid.uuid4().hex})
-        object_node = ET.SubElement(hierarchy, qualified_like(hierarchy, "OBJECT"))
-        ref_node = ET.SubElement(object_node, qualified_like(object_node, "SPEC-OBJECT-REF"))
-        ref_node.text = object_id
-        children.append(hierarchy)
-    flat_spec.append(children)
     for child in list(container):
         if local_name(child.tag) == "SPECIFICATION":
             container.remove(child)
-    container.append(flat_spec)
+    for specification in specifications:
+        retained_spec = copy.deepcopy(specification)
+        children = direct_container(retained_spec, "CHILDREN")
+        if children is None:
+            continue
+        prune_hierarchy_children(children, selected_ids)
+        if child_elements(children, "SPEC-HIERARCHY"):
+            container.append(retained_spec)
+
+
+def prune_hierarchy_children(children: ET.Element, selected_ids: set[str]) -> bool:
+    retained_child = False
+    for child in list(children):
+        if local_name(child.tag) != "SPEC-HIERARCHY":
+            continue
+        if prune_hierarchy(child, selected_ids):
+            retained_child = True
+        else:
+            children.remove(child)
+    return retained_child
+
+
+def prune_hierarchy(hierarchy: ET.Element, selected_ids: set[str]) -> bool:
+    object_ref = descendant_text(hierarchy, "SPEC-OBJECT-REF")
+    children = direct_container(hierarchy, "CHILDREN")
+    has_retained_child = prune_hierarchy_children(children, selected_ids) if children is not None else False
+    if children is not None and not has_retained_child:
+        hierarchy.remove(children)
+    return bool((object_ref and object_ref in selected_ids) or has_retained_child)
 
 
 def filter_spec_types(content: ET.Element, object_type_ids: set[str]) -> None:
@@ -267,17 +265,6 @@ def specification_type_ids(content: ET.Element) -> set[str]:
         for node in specification.iter()
         if local_name(node.tag) == "SPECIFICATION-TYPE-REF" and node.text and node.text.strip()
     }
-
-
-def hierarchies_by_object_ref(root: ET.Element) -> dict[str, ET.Element]:
-    result: dict[str, ET.Element] = {}
-    for hierarchy in root.iter():
-        if local_name(hierarchy.tag) != "SPEC-HIERARCHY":
-            continue
-        object_ref = descendant_text(hierarchy, "SPEC-OBJECT-REF")
-        if object_ref and object_ref not in result:
-            result[object_ref] = hierarchy
-    return result
 
 
 def safe_repo_file(repo: Path, rel_path: str) -> Path | None:

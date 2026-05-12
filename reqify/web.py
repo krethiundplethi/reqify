@@ -9,7 +9,7 @@ import sys
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 from xml.etree import ElementTree as ET
 
 from .agent import AgentBackendError, AgentRequest, analyze_agent
@@ -23,6 +23,7 @@ from .session_store import (
     create_filtered_export_artifact,
     export_session,
     history_payload,
+    load_attachment,
     load_export_artifact,
     load_payload,
     object_text_at_commit,
@@ -95,6 +96,15 @@ class ReqifyHandler(BaseHTTPRequestHandler):
             elif re.fullmatch(r"/api/session/[a-f0-9]{32}/export/[a-f0-9]{32}", path):
                 _, _, session_id, _, export_id = path.strip("/").split("/")
                 name, body, content_type = load_export_artifact(session_id, export_id)
+                self.send_attachment(name, body, content_type)
+            elif re.fullmatch(r"/api/session/[a-f0-9]{32}/attachment", path):
+                session_id = path.split("/")[3]
+                query = parse_qs(parsed.query)
+                rel_path = query.get("path", [""])[0]
+                if not rel_path:
+                    self.send_error_json(HTTPStatus.BAD_REQUEST, "Missing attachment path")
+                    return
+                name, body, content_type = load_attachment(session_id, rel_path)
                 self.send_attachment(name, body, content_type)
             elif path.startswith("/api/session/") and path.endswith("/export"):
                 session_id = path.split("/")[3]

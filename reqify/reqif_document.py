@@ -63,10 +63,14 @@ class ReqifDocument:
             if not type_id:
                 continue
             ids = []
-            for nested in element.iter():
-                if not local_name(nested.tag).startswith("ATTRIBUTE-DEFINITION"):
+            spec_attributes = direct_container(element, "SPEC-ATTRIBUTES")
+            if spec_attributes is None:
+                attribute_ids[type_id] = ids
+                continue
+            for definition in list(spec_attributes):
+                if not local_name(definition.tag).startswith("ATTRIBUTE-DEFINITION"):
                     continue
-                definition_id = nested.get("IDENTIFIER")
+                definition_id = definition.get("IDENTIFIER")
                 if definition_id:
                     ids.append(definition_id)
             attribute_ids[type_id] = ids
@@ -337,6 +341,7 @@ class ReqifDocument:
                 "title": self._title_for(object_id, attributes),
                 "objectTypeId": type_id,
                 "objectTypeName": self.spec_object_type_names.get(type_id, type_id),
+                "attributeOrder": list(self.spec_object_type_attribute_ids.get(type_id, [])),
                 "attributes": attributes,
             }
         specs = self._specifications()
