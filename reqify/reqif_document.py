@@ -9,6 +9,7 @@ from .xml_utils import (
     attribute_key,
     bool_attr,
     child_elements,
+    cleaned_element_inner_xml,
     collect_namespaces,
     descendant_text,
     direct_container,
@@ -159,25 +160,39 @@ class ReqifDocument:
             if local_name(node.tag).endswith("-REF") and node.text and node.text.strip()
         ]
 
-    def _value_payload(self, value_element: ET.Element) -> tuple[str, object]:
+    def _value_payload(self, value_element: ET.Element) -> tuple[str, object, dict[str, str] | None]:
         kind = local_name(value_element.tag).replace("ATTRIBUTE-VALUE-", "").lower()
         if local_name(value_element.tag) == "ATTRIBUTE-VALUE-ENUMERATION":
-            return "enumeration", self._enum_value_refs(value_element)
+            return "enumeration", self._enum_value_refs(value_element), None
         if local_name(value_element.tag) == "ATTRIBUTE-VALUE-XHTML":
-            return "xhtml", element_inner_xml(first_child(value_element, "THE-VALUE"))
+            the_value = first_child(value_element, "THE-VALUE")
+            return "xhtml", cleaned_element_inner_xml(the_value, convert_objects=False), self._xhtml_indent_payload(the_value)
         direct_value = value_element.get("THE-VALUE")
         if direct_value is not None:
-            return kind, direct_value
+            return kind, direct_value, None
         the_value = first_child(value_element, "THE-VALUE")
         if the_value is not None:
             if list(the_value):
-                return kind, element_inner_xml(the_value)
-            return kind, the_value.text or ""
+                return kind, element_inner_xml(the_value), None
+            return kind, the_value.text or "", None
         values = first_child(value_element, "VALUES")
         if values is not None:
             refs = [node.text.strip() for node in values.iter() if local_name(node.tag).endswith("-REF") and node.text]
-            return kind, ", ".join(refs)
-        return kind, ""
+            return kind, ", ".join(refs), None
+        return kind, "", None
+
+    def _xhtml_indent_payload(self, the_value: ET.Element | None) -> dict[str, str] | None:
+        if the_value is None:
+            return None
+        children = list(the_value)
+        child_indent = the_value.text if self._is_indent(the_value.text) else ""
+        closing_indent = children[-1].tail if children and self._is_indent(children[-1].tail) else ""
+        if not child_indent and not closing_indent:
+            return None
+        return {
+            "child": child_indent,
+            "closing": closing_indent,
+        }
 
     def _object_attributes(self, spec_object: ET.Element) -> list[dict[str, object]]:
         values = direct_container(spec_object, "VALUES")
@@ -187,8 +202,8 @@ class ReqifDocument:
                 if not local_name(value_element.tag).startswith("ATTRIBUTE-VALUE"):
                     continue
                 attr_id = self._attribute_ref(value_element)
-                kind, value = self._value_payload(value_element)
-                attributes.append(self._attribute_payload(attr_id, kind, value))
+                kind, value, xhtml_indent = self._value_payload(value_element)
+                attributes.append(self._attribute_payload(attr_id, kind, value, xhtml_indent=xhtml_indent))
         existing_ids = {str(attribute["id"]) for attribute in attributes}
         type_id = self._spec_object_type_ref(spec_object)
         for attr_id in self.spec_object_type_attribute_ids.get(type_id, []):
@@ -200,14 +215,21 @@ class ReqifDocument:
             attributes.append(self._attribute_payload(attr_id, kind, value, missing=True))
         return attributes
 
-    def _attribute_payload(self, attr_id: str, kind: str, value: object, missing: bool = False) -> dict[str, object]:
+    def _attribute_payload(
+        self,
+        attr_id: str,
+        kind: str,
+        value: object,
+        missing: bool = False,
+        xhtml_indent: dict[str, str] | None = None,
+    ) -> dict[str, object]:
         definition = self.attribute_defs.get(attr_id, {})
         options = definition.get("options", [])
         selected_labels = []
         if kind == "enumeration" and isinstance(value, list):
             labels_by_id = {str(option["id"]): str(option["label"]) for option in options if isinstance(option, dict)}
             selected_labels = [labels_by_id.get(str(ref), str(ref)) for ref in value]
-        return {
+        payload = {
             "id": attr_id,
             "name": self.definition_names.get(attr_id, attr_id),
             "type": kind,
@@ -218,6 +240,9 @@ class ReqifDocument:
             "editable": kind in {"xhtml", "string", "integer", "real", "date", "boolean", "enumeration"},
             "missing": missing,
         }
+        if kind == "xhtml" and xhtml_indent:
+            payload["xhtmlIndent"] = xhtml_indent
+        return payload
 
     def _is_verification_field_definition(self, attr_id: str) -> bool:
         name = self.definition_names.get(attr_id, attr_id)
@@ -375,11 +400,12 @@ class ReqifDocument:
                     self._apply_enum_update(value_element, raw_value)
                 elif local_name(value_element.tag) == "ATTRIBUTE-VALUE-XHTML":
                     value = str(raw_value)
+                    xhtml_indent = update.get("xhtmlIndent")
                     the_value = first_child(value_element, "THE-VALUE")
                     if the_value is None:
                         the_value = self._append_child(value_element, "THE-VALUE", "\n              ")
                     replace_xhtml_value(the_value, value)
-                    self._format_xhtml_value(the_value)
+                    self._format_xhtml_value(the_value, xhtml_indent)
                 elif "THE-VALUE" in value_element.attrib:
                     value_element.set("THE-VALUE", str(raw_value))
                 else:
@@ -400,7 +426,7 @@ class ReqifDocument:
                 if kind not in {"xhtml", "string", "integer", "real", "date", "boolean", "enumeration"}:
                     continue
                 value_element = self._create_value_element(values, str(attr_id), kind)
-                self._apply_value_update(value_element, update["value"])
+                self._apply_value_update(value_element, update["value"], update.get("xhtmlIndent"))
                 object_changed = True
             if object_changed:
                 spec_object.set("LAST-CHANGE", last_change)
@@ -481,7 +507,7 @@ class ReqifDocument:
             return indent
         return f"{newline}\n{spaces[:-2] if len(spaces) >= 2 else spaces}"
 
-    def _apply_value_update(self, value_element: ET.Element, raw_value: object) -> None:
+    def _apply_value_update(self, value_element: ET.Element, raw_value: object, xhtml_indent: object | None = None) -> None:
         if local_name(value_element.tag) == "ATTRIBUTE-VALUE-ENUMERATION":
             self._apply_enum_update(value_element, raw_value)
         elif local_name(value_element.tag) == "ATTRIBUTE-VALUE-XHTML":
@@ -489,7 +515,7 @@ class ReqifDocument:
             if the_value is None:
                 the_value = self._append_child(value_element, "THE-VALUE", "\n              ")
             replace_xhtml_value(the_value, str(raw_value))
-            self._format_xhtml_value(the_value)
+            self._format_xhtml_value(the_value, xhtml_indent)
         else:
             value_element.set("THE-VALUE", str(raw_value))
 
@@ -520,18 +546,30 @@ class ReqifDocument:
         if selected_refs:
             list(values_element)[-1].tail = closing_indent
 
-    def _format_xhtml_value(self, the_value: ET.Element) -> None:
+    def _format_xhtml_value(self, the_value: ET.Element, xhtml_indent: object | None = None) -> None:
         children = list(the_value)
         if not children or (the_value.text and the_value.text.strip()):
             return
-        child_indent = self._child_indent(the_value, "\n                ")
-        closing_indent = self._closing_indent(the_value, child_indent)
+        child_indent = self._xhtml_indent_value(xhtml_indent, "child") or self._child_indent(the_value, "\n                ")
+        closing_indent = self._xhtml_indent_value(xhtml_indent, "closing") or self._closing_indent(the_value, child_indent)
+        has_explicit_indent = isinstance(xhtml_indent, dict)
         the_value.text = child_indent
         for child in children[:-1]:
-            if not self._is_indent(child.tail):
+            if has_explicit_indent and (child.tail is None or self._is_indent(child.tail)):
                 child.tail = child_indent
-        if not self._is_indent(children[-1].tail):
+            elif not self._is_indent(child.tail):
+                child.tail = child_indent
+        if has_explicit_indent and (children[-1].tail is None or self._is_indent(children[-1].tail)):
             children[-1].tail = closing_indent
+        elif not self._is_indent(children[-1].tail):
+            children[-1].tail = closing_indent
+
+    @staticmethod
+    def _xhtml_indent_value(xhtml_indent: object | None, key: str) -> str:
+        if not isinstance(xhtml_indent, dict):
+            return ""
+        value = xhtml_indent.get(key)
+        return value if isinstance(value, str) and "\n" in value and not value.strip() else ""
 
     def write(self) -> None:
         self.tree.write(self.xml_path, encoding="utf-8", xml_declaration=True, short_empty_elements=True)

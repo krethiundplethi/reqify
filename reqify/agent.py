@@ -7,6 +7,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
@@ -66,7 +67,7 @@ STRUCTURED_RESPONSE_INSTRUCTIONS = """Return only JSON matching this schema:
       "objectId": "selected ReqIF object id",
       "attributeId": "exact attribute id from the selected item context",
       "attributeName": "exact attribute name from the selected item context",
-      "valueXhtml": "complete replacement value as XHTML fragment",
+      "valueXhtml": "complete replacement value as a valid XHTML/HTML fragment",
       "valueEnum": ["for enumeration fields only, selected option labels or ids"]
     }
   ]
@@ -78,9 +79,11 @@ Do not use numeric scores, letter grades, well_formed, or multiple ratings.
 No positive feedback, no risk section, no discussion.
 Include edits for requirement text and verification fields when any needs improvement and the field exists.
 For enumeration fields, use valueEnum with allowed option labels or ids from context.
-For text fields, use valueXhtml with the complete replacement as an XHTML fragment.
+For text fields, use valueXhtml with the complete replacement as a valid XHTML/HTML fragment.
+For XHTML fields, especially ReqIF.Text, match the structure of the source XHTML when practical and preserve valid existing links, href attributes, and tables that remain semantically relevant.
+If the source XHTML contains a <span class="reqif-attachment" data-reqif-xhtml-object="1"> attachment marker, preserve that full span and its nested link exactly when the attachment remains relevant.
 For plain non-XHTML fields, still use valueXhtml; the client converts it to plain text.
-Do not use Markdown inside edit values. Use <br/> for line breaks in valueXhtml.
+Do not use Markdown inside edit values; Markdown is allowed only in the top-level markdown field. Use XHTML/HTML tags such as <p>, <br/>, <ul>, <ol>, <table>, and <a href="..."> in valueXhtml.
 Use edits only for fields where you propose a concrete replacement.
 Preserve the full intended field value, not a diff."""
 
@@ -111,9 +114,11 @@ class LocalAgentBackend:
 
 class OpenAIResponsesBackend:
     def analyze(self, system_prompt: str, request: AgentRequest) -> str:
-        api_key = env_first("REQIFY_OPENAI_API_KEY", "OPENAI_API_KEY")
+        api_key = openai_api_key()
         if not api_key:
-            raise AgentBackendError("OpenAI API key is missing. Set OPENAI_API_KEY or REQIFY_OPENAI_API_KEY.")
+            raise AgentBackendError(
+                "OpenAI API key is missing. Set REQIFY_OPENAI_API_KEY_FILE, REQIFY_OPENAI_API_KEY, or OPENAI_API_KEY."
+            )
         base_url = os.environ.get("REQIFY_OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
         model = os.environ.get("REQIFY_OPENAI_MODEL", "gpt-5.4").strip()
         user_input = compose_user_input(request)
@@ -289,7 +294,7 @@ def summarize_object(selected_object: dict[str, object] | None) -> str:
             elif key == "reqifchaptername" or key.endswith("chaptername"):
                 chapter_name_attribute = attribute
         if reqif_text_attribute:
-            lines.append(format_attribute_line(reqif_text_attribute, "Requirement text", 1200))
+            lines.append(format_attribute_line(reqif_text_attribute, "Requirement text", None))
         elif selected_object.get("title"):
             lines.append(f"Title: {strip_markup(str(selected_object.get('title') or ''))}")
         if chapter_name_attribute:
@@ -310,17 +315,26 @@ def summarize_object(selected_object: dict[str, object] | None) -> str:
     return "\n".join(lines)
 
 
-def format_attribute_line(attribute: dict[str, object], label: str, limit: int = 700) -> str:
+def format_attribute_line(attribute: dict[str, object], label: str, limit: int | None = 700) -> str:
     attr_id = str(attribute.get("id") or "")
     name = str(attribute.get("name") or attr_id or "Attribute")
+    text = format_attribute_value_for_prompt(attribute, limit)
+    if not text:
+        return ""
+    suffix = format_attribute_options(attribute) if is_verification_attribute(attr_id, name) else ""
+    if attribute.get("type") == "xhtml":
+        return f"{label} id={attr_id} name={name} XHTML{suffix}:\n{text}"
+    return f"{label} id={attr_id} name={name}: {text}{suffix}"
+
+
+def format_attribute_value_for_prompt(attribute: dict[str, object], limit: int | None) -> str:
+    if attribute.get("type") == "xhtml":
+        return str(attribute.get("value", "")).strip()
     value = attribute.get("displayValue", attribute.get("value", ""))
     if isinstance(value, list):
         value = ", ".join(str(item) for item in value)
     text = strip_markup(str(value)).strip()
-    if not text:
-        return ""
-    suffix = format_attribute_options(attribute) if is_verification_attribute(attr_id, name) else ""
-    return f"{label} id={attr_id} name={name}: {text[:limit]}{suffix}"
+    return text if limit is None else text[:limit]
 
 
 def format_attribute_options(attribute: dict[str, object]) -> str:
@@ -405,6 +419,24 @@ def env_first(*names: str) -> str:
         if value:
             return value
     return ""
+
+
+def secret_file_env(name: str) -> str:
+    path = os.environ.get(name, "").strip()
+    if not path:
+        return ""
+    expanded_path = Path(path).expanduser()
+    try:
+        value = expanded_path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise AgentBackendError(f"{name} points to an API key file that could not be read: {expanded_path}") from exc
+    if not value:
+        raise AgentBackendError(f"{name} points to an empty API key file: {expanded_path}")
+    return value
+
+
+def openai_api_key() -> str:
+    return secret_file_env("REQIFY_OPENAI_API_KEY_FILE") or env_first("REQIFY_OPENAI_API_KEY", "OPENAI_API_KEY")
 
 
 def int_env(name: str, default: int) -> int:

@@ -47,6 +47,25 @@ def element_inner_xml(element: ET.Element | None, convert_objects: bool = True) 
     return "".join(parts)
 
 
+def cleaned_element_inner_xml(element: ET.Element | None, convert_objects: bool = True) -> str:
+    return strip_structural_indent(element_inner_xml(element, convert_objects))
+
+
+def strip_structural_indent(value: str) -> str:
+    if not value:
+        return ""
+    lines = value.splitlines()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    indents = [len(line) - len(line.lstrip(" \t")) for line in lines if line.strip()]
+    common_indent = min(indents) if indents else 0
+    if common_indent:
+        lines = [line[common_indent:] if line.strip() else "" for line in lines]
+    return "\n".join(lines)
+
+
 def browser_html_fragment(element: ET.Element, convert_objects: bool = True) -> str:
     tag = local_name(element.tag)
     if convert_objects and tag.lower() == "object" and element.get("data"):

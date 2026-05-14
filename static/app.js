@@ -16,6 +16,7 @@ const state = {
   comparisonModifiedObjectIds: new Set(),
   selectedHistoryObjects: null,
   editorCursor: null,
+  suppressUiDirty: false,
   documentFilters: {
     modified: false,
     requirements: false,
@@ -45,7 +46,7 @@ const els = {
   agentPrompt: document.getElementById("agentPrompt"),
   agentAnalyze: document.getElementById("agentAnalyze"),
   agentApply: document.getElementById("agentApply"),
-  agentApplyNext: document.getElementById("agentApplyNext"),
+  agentApplyReqifText: document.getElementById("agentApplyReqifText"),
   agentResponse: document.getElementById("agentResponse"),
   agentPreview: document.getElementById("agentPreview"),
   operationOverlay: document.getElementById("operationOverlay"),
@@ -127,10 +128,120 @@ function markdownToXhtml(markdown) {
   return html.join("");
 }
 
+function hasHtmlTag(value) {
+  return /<\/?[a-z][a-z0-9:-]*(?:\s[^>]*)?>/i.test(String(value || ""));
+}
+
+function normalizeAgentXhtml(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const html = hasHtmlTag(text) ? text : markdownToXhtml(text);
+  return normalizeSourceXhtml(html);
+}
+
+function normalizeSourceXhtml(value) {
+  const html = String(value || "");
+  return html
+    .replace(/\s+xmlns(?::[A-Za-z_][\w.-]*)?="[^"]*"/g, "")
+    .replace(/<\/?(?:xhtml|html):/gi, (match) => match.replace(/xhtml:/i, "").replace(/html:/i, ""));
+}
+
+function encodeBase64Utf8(value) {
+  return btoa(unescape(encodeURIComponent(String(value || ""))));
+}
+
+function decodeBase64Utf8(value) {
+  try {
+    return decodeURIComponent(escape(atob(String(value || ""))));
+  } catch (_) {
+    return "";
+  }
+}
+
+function safeImageDimension(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const number = text.match(/^([1-9]\d{0,4})$/);
+  if (number) return Number(number[1]) <= 10000 ? number[1] : "";
+  const px = text.match(/^([1-9]\d{0,4})px$/i);
+  if (px) return Number(px[1]) <= 10000 ? `${Number(px[1])}px` : "";
+  const percent = text.match(/^([1-9]\d?|100)%$/);
+  if (percent) return `${Number(percent[1])}%`;
+  return "";
+}
+
+function imageDimensionCss(value) {
+  if (!value) return "";
+  return /^\d+$/.test(value) ? `${value}px` : value;
+}
+
+function sourceXhtmlToRenderedHtml(source) {
+  const template = document.createElement("template");
+  template.innerHTML = normalizeSourceXhtml(source);
+  template.content.querySelectorAll("object[data]").forEach((objectNode) => {
+    if (!template.content.contains(objectNode)) return;
+    const dataPath = objectNode.getAttribute("data") || "";
+    const name = objectNode.getAttribute("name") || "";
+    const contentType = objectNode.getAttribute("type") || "";
+    const width = safeImageDimension(objectNode.getAttribute("width"));
+    const height = safeImageDimension(objectNode.getAttribute("height"));
+    const fallback = objectNode.innerHTML || "";
+    const label = name || dataPath.split(/[\\/]/).pop() || plainText(fallback) || "Attachment";
+    const chip = document.createElement("span");
+    chip.dataset.reqifXhtmlObject = "1";
+    chip.dataset.reqifObjectData = dataPath;
+    chip.dataset.reqifObjectName = name;
+    chip.dataset.reqifObjectType = contentType;
+    chip.dataset.reqifObjectFallback = encodeBase64Utf8(fallback);
+    if (width) chip.dataset.reqifObjectWidth = width;
+    if (height) chip.dataset.reqifObjectHeight = height;
+    chip.contentEditable = "false";
+    const isPngImage = contentType.toLowerCase() === "image/png";
+    chip.className = isPngImage ? "reqif-attachment reqif-image-attachment" : "reqif-attachment";
+    if (isPngImage) {
+      const image = document.createElement("img");
+      image.src = attachmentDownloadUrl(dataPath);
+      image.alt = label;
+      image.loading = "lazy";
+      if (width) image.style.width = imageDimensionCss(width);
+      if (height) image.style.height = imageDimensionCss(height);
+      chip.appendChild(image);
+    }
+    const link = document.createElement("a");
+    link.dataset.reqifObjectLink = "1";
+    link.href = "#";
+    link.title = `Download ${label}`;
+    link.textContent = label;
+    chip.appendChild(link);
+    objectNode.replaceWith(chip);
+  });
+  return template.innerHTML;
+}
+
+function renderedHtmlToSourceXhtml(rendered) {
+  const template = document.createElement("template");
+  template.innerHTML = normalizeSourceXhtml(rendered);
+  template.content.querySelectorAll('[data-reqif-xhtml-object="1"]').forEach((chip) => {
+    const dataPath = chip.dataset.reqifObjectData || "";
+    if (!dataPath) return;
+    const objectNode = document.createElement("object");
+    objectNode.setAttribute("data", dataPath);
+    if (chip.dataset.reqifObjectName) objectNode.setAttribute("name", chip.dataset.reqifObjectName);
+    if (chip.dataset.reqifObjectType) objectNode.setAttribute("type", chip.dataset.reqifObjectType);
+    if (safeImageDimension(chip.dataset.reqifObjectWidth)) objectNode.setAttribute("width", safeImageDimension(chip.dataset.reqifObjectWidth));
+    if (safeImageDimension(chip.dataset.reqifObjectHeight)) objectNode.setAttribute("height", safeImageDimension(chip.dataset.reqifObjectHeight));
+    const fallback = decodeBase64Utf8(chip.dataset.reqifObjectFallback || "");
+    objectNode.innerHTML = fallback || escapeHtml(chip.textContent || chip.dataset.reqifObjectName || dataPath.split(/[\\/]/).pop() || "Attachment");
+    chip.replaceWith(objectNode);
+  });
+  return template.innerHTML;
+}
+
 function sanitizeXhtmlFragment(value) {
   const template = document.createElement("template");
   template.innerHTML = String(value || "");
   const allowedTags = new Set([
+    "A",
     "B",
     "BR",
     "CAPTION",
@@ -142,7 +253,9 @@ function sanitizeXhtmlFragment(value) {
     "I",
     "LI",
     "OL",
+    "OBJECT",
     "P",
+    "SPAN",
     "STRONG",
     "TABLE",
     "TBODY",
@@ -156,6 +269,26 @@ function sanitizeXhtmlFragment(value) {
   ]);
   const tableTags = new Set(["COL", "COLGROUP", "TD", "TH"]);
   const tableAttributeNames = new Set(["colspan", "rowspan", "scope", "span"]);
+  const anchorAttributeNames = new Set(["href", "title", "class"]);
+  const objectAttributeNames = new Set(["data", "height", "name", "type", "width"]);
+  const attachmentAttributeNames = new Set([
+    "class",
+    "contenteditable",
+    "data-reqif-object-data",
+    "data-reqif-object-fallback",
+    "data-reqif-object-height",
+    "data-reqif-object-name",
+    "data-reqif-object-type",
+    "data-reqif-object-width",
+    "data-reqif-xhtml-object",
+  ]);
+  const attachmentLinkAttributeNames = new Set(["data-reqif-object-link"]);
+  const validHref = (attrValue) => {
+    const value = String(attrValue || "").trim();
+    if (!value || /^[\u0000-\u001f\u007f\s]/.test(value)) return false;
+    const scheme = value.match(/^([a-z][a-z0-9+.-]*):/i)?.[1]?.toLowerCase();
+    return !scheme || ["http", "https", "mailto"].includes(scheme);
+  };
   const validTableAttribute = (element, name, attrValue) => {
     if (!tableTags.has(element.tagName)) return false;
     const normalized = String(attrValue || "").trim();
@@ -164,10 +297,30 @@ function sanitizeXhtmlFragment(value) {
     if (name === "span") return ["COL", "COLGROUP"].includes(element.tagName) && /^[1-9]\d*$/.test(normalized);
     return false;
   };
+  const validAttachmentAttribute = (element, name, attrValue) => {
+    if (element.tagName !== "SPAN" || element.getAttribute("data-reqif-xhtml-object") !== "1") return false;
+    if (!attachmentAttributeNames.has(name)) return false;
+    if (name === "contenteditable") return String(attrValue || "").toLowerCase() === "false";
+    if (name === "class") return /^reqif-attachment(?:\s+reqif-image-attachment)?$/.test(String(attrValue || ""));
+    if (name === "data-reqif-xhtml-object") return String(attrValue || "") === "1";
+    if (name === "data-reqif-object-width" || name === "data-reqif-object-height") return Boolean(safeImageDimension(attrValue));
+    return true;
+  };
+  const validObjectAttribute = (element, name, attrValue) => {
+    if (element.tagName !== "OBJECT" || !objectAttributeNames.has(name)) return false;
+    if (name === "width" || name === "height") return Boolean(safeImageDimension(attrValue));
+    return true;
+  };
   const cleanAttributes = (element) => {
     [...element.attributes].forEach((attr) => {
       const name = attr.name.toLowerCase();
       if (tableAttributeNames.has(name) && validTableAttribute(element, name, attr.value)) return;
+      if (validAttachmentAttribute(element, name, attr.value)) return;
+      if (validObjectAttribute(element, name, attr.value)) return;
+      if (element.tagName === "A" && anchorAttributeNames.has(name)) {
+        if (name !== "href" || validHref(attr.value)) return;
+      }
+      if (element.tagName === "A" && attachmentLinkAttributeNames.has(name) && attr.value === "1") return;
       element.removeAttribute(attr.name);
     });
   };
@@ -364,12 +517,19 @@ function captureEditorCursor(editor) {
   if (!selection || !selection.rangeCount) return;
   const range = selection.getRangeAt(0);
   if (!editor.contains(range.startContainer)) return;
-  state.editorCursor = {
+  const nextCursor = {
     objectId: editor.dataset.objectId || state.selectedId || "",
     attrId: editor.dataset.attrId || "",
     origin: editor.dataset.origin || "",
     offset: textOffsetForPosition(editor, range.startContainer, range.startOffset),
   };
+  const changed =
+    state.editorCursor?.objectId !== nextCursor.objectId ||
+    state.editorCursor?.attrId !== nextCursor.attrId ||
+    state.editorCursor?.origin !== nextCursor.origin ||
+    state.editorCursor?.offset !== nextCursor.offset;
+  state.editorCursor = nextCursor;
+  if (changed && !state.suppressUiDirty) markUiDirty();
 }
 
 function captureActiveEditorCursor() {
@@ -410,9 +570,15 @@ function restoreEditorCursor() {
     const selector = `.xhtml-editor[data-object-id="${CSS.escape(cursor.objectId)}"][data-attr-id="${CSS.escape(cursor.attrId)}"]`;
     const editor = document.querySelector(selector);
     if (!editor) return;
-    selectObject(cursor.objectId);
-    editor.focus();
-    setCursorByTextOffset(editor, cursor.offset);
+    state.suppressUiDirty = true;
+    try {
+      selectObject(cursor.objectId);
+      editor.focus();
+      setCursorByTextOffset(editor, cursor.offset);
+      state.editorCursor = cursor;
+    } finally {
+      state.suppressUiDirty = false;
+    }
   });
 }
 
@@ -501,6 +667,14 @@ function markDirty(objectId = null, attrId = null) {
     if (state.selectedHistoryObjects) recomputeComparisonModifiedObjectIds();
     updateDocumentModificationState(objectId);
   }
+  setStatus(`${state.fileName} • unsaved`, true);
+  updateSaveState();
+  updateExportState();
+}
+
+function markUiDirty() {
+  if (!state.sessionId || state.dirty) return;
+  state.dirty = true;
   setStatus(`${state.fileName} • unsaved`, true);
   updateSaveState();
   updateExportState();
@@ -627,7 +801,7 @@ function agentEditsForSelection() {
 function updateAgentApplyState() {
   const edits = agentEditsForSelection();
   els.agentApply.disabled = !edits.length;
-  els.agentApplyNext.disabled = !edits.length;
+  els.agentApplyReqifText.disabled = !agentReqifTextEditForSelection();
   renderAgentPreview(edits);
 }
 
@@ -677,9 +851,12 @@ function renderAgentPreview(edits = agentEditsForSelection()) {
         },
       );
       const editable = editor.querySelector(".xhtml-editor");
-      if (editable) {
-        const value = editable.innerHTML || "";
+      const rawEditable = editor.querySelector(".raw-xhtml-editor");
+      if (rawEditable) {
+        const value = rawEditable.value || "";
         edit.valueXhtml = value;
+      } else if (editable) {
+        edit.valueXhtml = renderedHtmlToSourceXhtml(editable.innerHTML || "");
       }
       row.appendChild(editor);
     }
@@ -1182,6 +1359,7 @@ function renderXhtmlEditor(objectId, attr, origin, options = {}) {
   shell.className = "editor-shell";
   shell.innerHTML = `
     <div class="editor-toolbar">
+      <button type="button" data-action="raw" title="Edit raw XHTML">Raw</button>
       <button type="button" data-command="bold" title="Bold">B</button>
       <button type="button" data-command="italic" title="Italic">I</button>
       <button type="button" data-command="underline" title="Underline">U</button>
@@ -1192,14 +1370,23 @@ function renderXhtmlEditor(objectId, attr, origin, options = {}) {
       <button type="button" data-command="redo" title="Redo">↷</button>
     </div>
   `;
+  let sourceValue = String(attr.value || "");
+  let rawMode = false;
   const editor = document.createElement("div");
   editor.className = "xhtml-editor";
   editor.contentEditable = attr.editable ? "true" : "false";
   editor.dataset.objectId = objectId;
   editor.dataset.attrId = attr.id;
   editor.dataset.origin = origin;
-  editor.innerHTML = attr.value || "";
+  editor.innerHTML = sourceXhtmlToRenderedHtml(sourceValue);
   hydrateAttachmentLinks(editor);
+  const rawEditor = document.createElement("textarea");
+  rawEditor.className = "raw-xhtml-editor";
+  rawEditor.value = sourceValue;
+  rawEditor.dataset.objectId = objectId;
+  rawEditor.dataset.attrId = attr.id;
+  rawEditor.dataset.origin = origin;
+  rawEditor.hidden = true;
   const showToolbar = () => {
     shell.classList.add("editing");
   };
@@ -1212,23 +1399,62 @@ function renderXhtmlEditor(objectId, attr, origin, options = {}) {
   };
   editor.addEventListener("focus", showToolbar);
   editor.addEventListener("blur", hideToolbar);
+  rawEditor.addEventListener("focus", showToolbar);
+  rawEditor.addEventListener("blur", hideToolbar);
   ["focus", "keyup", "mouseup", "input"].forEach((eventName) => {
     editor.addEventListener(eventName, () => captureEditorCursor(editor));
   });
-  const applyEditorChange = () => {
-    const value = editor.innerHTML;
+  const applySourceChange = (value, sourceNode) => {
+    sourceValue = value;
     if (options.onChange) {
-      options.onChange(value, editor);
+      options.onChange(value, sourceNode);
       return;
     }
     updateAttribute(objectId, attr.id, value);
-    syncEditors(objectId, attr.id, value, editor);
+    syncEditors(objectId, attr.id, value, sourceNode);
+  };
+  const applyEditorChange = () => {
+    const value = renderedHtmlToSourceXhtml(editor.innerHTML);
+    rawEditor.value = value;
+    applySourceChange(value, editor);
+  };
+  const setRawMode = (nextRawMode) => {
+    rawMode = nextRawMode;
+    shell.classList.toggle("raw-mode", rawMode);
+    editor.hidden = rawMode;
+    rawEditor.hidden = !rawMode;
+    sourceValue = rawEditor.value;
+    if (rawMode) {
+      rawEditor.value = sourceValue;
+      rawEditor.focus();
+    } else {
+      editor.innerHTML = sourceXhtmlToRenderedHtml(sourceValue);
+      hydrateAttachmentLinks(editor);
+      editor.focus();
+    }
+    shell.querySelectorAll("[data-command], [data-action='plain-text']").forEach((button) => {
+      button.disabled = rawMode;
+    });
   };
   editor.addEventListener("input", applyEditorChange);
+  rawEditor.addEventListener("input", () => {
+    const value = rawEditor.value;
+    editor.innerHTML = sourceXhtmlToRenderedHtml(value);
+    hydrateAttachmentLinks(editor);
+    applySourceChange(value, rawEditor);
+  });
   shell.appendChild(editor);
+  shell.appendChild(rawEditor);
+  const rawButton = shell.querySelector('[data-action="raw"]');
+  rawButton.addEventListener("mousedown", (event) => event.preventDefault());
+  rawButton.addEventListener("click", () => {
+    setRawMode(!rawMode);
+    rawButton.classList.toggle("active", rawMode);
+  });
   shell.querySelectorAll("[data-command]").forEach((button) => {
     button.addEventListener("mousedown", (event) => event.preventDefault());
     button.addEventListener("click", () => {
+      if (rawMode) return;
       editor.focus();
       document.execCommand(button.dataset.command, false, null);
       applyEditorChange();
@@ -1238,6 +1464,7 @@ function renderXhtmlEditor(objectId, attr, origin, options = {}) {
   const plainTextButton = shell.querySelector('[data-action="plain-text"]');
   plainTextButton.addEventListener("mousedown", (event) => event.preventDefault());
   plainTextButton.addEventListener("click", () => {
+    if (rawMode) return;
     editor.focus();
     editor.innerHTML = plainTextToXhtml(richTextToPlainText(editor.innerHTML));
     applyEditorChange();
@@ -1250,8 +1477,10 @@ function syncEditors(objectId, attrId, value, source) {
   document.querySelectorAll(`[data-object-id="${CSS.escape(objectId)}"][data-attr-id="${CSS.escape(attrId)}"]`).forEach((node) => {
     if (node === source) return;
     if (node.classList.contains("xhtml-editor")) {
-      node.innerHTML = value;
+      node.innerHTML = sourceXhtmlToRenderedHtml(value);
       hydrateAttachmentLinks(node);
+    } else if (node.classList.contains("raw-xhtml-editor")) {
+      node.value = value;
     } else if ("value" in node) {
       node.value = value;
     }
@@ -1521,8 +1750,7 @@ els.fileInput.addEventListener("change", async () => {
   }
 });
 
-els.saveButton.addEventListener("click", async () => {
-  if (!state.sessionId) return;
+function collectDirtyUpdates() {
   const updates = {};
   state.dirtyAttributeIds.forEach((key) => {
     const [objectId, attrId] = key.split("\u0000");
@@ -1530,17 +1758,40 @@ els.saveButton.addEventListener("click", async () => {
     if (!attr) return;
     updates[objectId] ||= {};
     updates[objectId][attrId] = { value: attr.value };
+    if (attr.type === "xhtml" && attr.xhtmlIndent) {
+      updates[objectId][attrId].xhtmlIndent = attr.xhtmlIndent;
+    }
   });
+  return updates;
+}
+
+async function saveCurrentWorkspace(commitMessage = "") {
+  if (!state.sessionId) return null;
+  const updates = collectDirtyUpdates();
+  return await runAsyncOperation(
+    () => apiJson(`/api/session/${state.sessionId}/save`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ objects: updates, viewedCommit: viewedCommit(), uiState: captureUiState(), commitMessage }),
+    }),
+    commitMessage === "exported" ? "Saving before export..." : "Saving changes...",
+  );
+}
+
+async function saveBeforeExportIfDirty() {
+  if (!state.dirty) return;
+  setStatus("Saving before export...");
+  const payload = await saveCurrentWorkspace("exported");
+  ingest(payload);
+}
+
+els.agentPrompt.addEventListener("input", markUiDirty);
+
+els.saveButton.addEventListener("click", async () => {
+  if (!state.sessionId) return;
   setStatus("Saving...");
   try {
-    const payload = await runAsyncOperation(
-      () => apiJson(`/api/session/${state.sessionId}/save`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ objects: updates, viewedCommit: viewedCommit(), uiState: captureUiState() }),
-      }),
-      "Saving changes...",
-    );
+    const payload = await saveCurrentWorkspace();
     ingest(payload);
     setStatus(payload.committed ? `${state.fileName} · committed` : `${state.fileName} · unchanged`);
   } catch (error) {
@@ -1552,6 +1803,7 @@ els.exportButton.addEventListener("click", async () => {
   if (!state.sessionId) return;
   setStatus("Exporting...");
   try {
+    await saveBeforeExportIfDirty();
     const payload = await runAsyncOperation(
       () => apiJson(`/api/session/${state.sessionId}/export`, { method: "POST" }),
       "Preparing export...",
@@ -1574,6 +1826,7 @@ els.exportFilteredButton.addEventListener("click", async () => {
   }
   setStatus("Exporting filtered view...");
   try {
+    await saveBeforeExportIfDirty();
     const payload = await runAsyncOperation(
       () => apiJson(`/api/session/${state.sessionId}/export-filtered`, {
         method: "POST",
@@ -1635,7 +1888,7 @@ function isAgentEdit(edit) {
   );
 }
 
-function applyAgentSuggestion({ advance = false } = {}) {
+function applyAgentSuggestion() {
   const object = state.objects[state.selectedId];
   if (!object) return;
   const edits = agentEditsForSelection();
@@ -1660,13 +1913,38 @@ function applyAgentSuggestion({ advance = false } = {}) {
   setStatus(`${state.fileName} • unsaved`, true);
   renderDocument();
   renderAttributes();
-  if (advance && selectNextRequirement(object.id)) {
-    analyzeWithAgent();
-  }
 }
 
-function applyAgentSuggestionAndNext() {
-  applyAgentSuggestion({ advance: true });
+function agentReqifTextEditForSelection() {
+  const object = state.objects[state.selectedId];
+  const textAttr = object ? reqifTextAttr(object) : null;
+  if (!object || !textAttr?.editable) return null;
+  return agentEditsForSelection().find((edit) => findEditableAttribute(object, edit)?.id === textAttr.id) || null;
+}
+
+function removeAgentEdit(editToRemove) {
+  if (!state.agentSuggestion?.edits) return;
+  state.agentSuggestion.edits = state.agentSuggestion.edits.filter((edit) => edit !== editToRemove);
+  if (!state.agentSuggestion.edits.length) state.agentSuggestion = null;
+}
+
+function applyAgentReqifTextSuggestion() {
+  const object = state.objects[state.selectedId];
+  const textAttr = object ? reqifTextAttr(object) : null;
+  const edit = agentReqifTextEditForSelection();
+  if (!object || !textAttr || !edit) return;
+  const nextValue = agentEditValueForAttribute(textAttr, edit);
+  if (!nextValue) {
+    els.agentResponse.textContent = "The agent response did not provide a ReqIF.Text replacement.";
+    return;
+  }
+  updateAttribute(object.id, textAttr.id, nextValue);
+  syncEditors(object.id, textAttr.id, nextValue, null);
+  removeAgentEdit(edit);
+  updateAgentApplyState();
+  setStatus(`${state.fileName} • unsaved`, true);
+  renderDocument();
+  renderAttributes();
 }
 
 function findEditableAttribute(object, edit) {
@@ -1723,40 +2001,10 @@ function enumValuesFromAgentEdit(attr, edit) {
 
 function agentEditValueForAttribute(attr, edit) {
   if (attr.type === "xhtml") {
-    return sanitizeXhtmlFragment(edit.valueXhtml);
+    return renderedHtmlToSourceXhtml(sanitizeXhtmlFragment(normalizeAgentXhtml(edit.valueXhtml)));
   }
   if (attr.type === "enumeration") return enumValuesFromAgentEdit(attr, edit);
   return xhtmlToPlainText(edit.valueXhtml);
-}
-
-function selectNextRequirement(currentObjectId) {
-  const start = state.documentOrder.indexOf(currentObjectId);
-  const ordered = start >= 0 ? state.documentOrder.slice(start + 1) : state.documentOrder;
-  const nextId = ordered.find((objectId) => {
-    const object = state.objects[objectId];
-    return object && objectKind(object) === "requirement" && reqifTextAttr(object);
-  });
-  if (!nextId) return null;
-  selectObject(nextId);
-  focusDocumentEditor(nextId);
-  return nextId;
-}
-
-function focusDocumentEditor(objectId) {
-  requestAnimationFrame(() => {
-    const selector = `.document-item[data-object-id="${CSS.escape(objectId)}"] [data-origin="document text"]`;
-    const editor = document.querySelector(selector);
-    if (!editor) return;
-    editor.focus();
-    if (editor.classList.contains("xhtml-editor")) {
-      const range = document.createRange();
-      range.selectNodeContents(editor);
-      range.collapse(false);
-      const selection = window.getSelection();
-      selection.removeAllRanges();
-      selection.addRange(range);
-    }
-  });
 }
 
 function bindDocumentFilter(input, key) {
@@ -1771,7 +2019,7 @@ function bindDocumentFilter(input, key) {
 
 els.agentAnalyze.addEventListener("click", analyzeWithAgent);
 els.agentApply.addEventListener("click", () => applyAgentSuggestion());
-els.agentApplyNext.addEventListener("click", applyAgentSuggestionAndNext);
+els.agentApplyReqifText.addEventListener("click", applyAgentReqifTextSuggestion);
 bindDocumentFilter(els.filterModified, "modified");
 bindDocumentFilter(els.filterRequirements, "requirements");
 bindDocumentFilter(els.filterEmptyVerificationCriteria, "emptyVerificationCriteria");

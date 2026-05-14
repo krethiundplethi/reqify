@@ -33,7 +33,7 @@ The implementation uses only the Python standard library and browser-native Java
 
 The agent panel posts to `/api/agent/analyze`. Successful responses are reserved for text returned by an implemented LLM backend; unavailable or unimplemented backends return a JSON error with the reason.
 
-Agent responses must be machine-readable JSON with a human-readable `markdown` field and an `edits` array that identifies the target ReqIF object and attribute. Reqify validates this JSON before returning it to the browser. The browser renders the markdown as XHTML and uses the edits for `Apply & Next`.
+Agent responses must be machine-readable JSON with a human-readable `markdown` field and an `edits` array that identifies the target ReqIF object and attribute. Reqify validates this JSON before returning it to the browser. The browser renders the markdown as XHTML and uses the edits for `Apply` or `Apply ReqIF.Text`.
 
 Configure `REQIFY_AGENT_PROMPT` to replace the default system prompt and `REQIFY_AGENT_BACKEND` to select a backend:
 
@@ -45,11 +45,14 @@ OpenAI configuration:
 
 ```bash
 export REQIFY_AGENT_BACKEND=openai
-export OPENAI_API_KEY=...
+mkdir -p ~/.config/reqify
+printf '%s\n' 'your-openai-api-key' > ~/.config/reqify/openai_api_key
+chmod 600 ~/.config/reqify/openai_api_key
+export REQIFY_OPENAI_API_KEY_FILE=~/.config/reqify/openai_api_key
 export REQIFY_OPENAI_MODEL=gpt-5.2
 ```
 
-`REQIFY_OPENAI_API_KEY` can be used instead of `OPENAI_API_KEY`. `REQIFY_OPENAI_BASE_URL` can override the default `https://api.openai.com/v1`. ChatGPT Pro and OpenAI API billing are separate, so a ChatGPT Pro subscription still needs API access and an API key for this backend.
+`REQIFY_OPENAI_API_KEY_FILE` is preferred. `REQIFY_OPENAI_API_KEY` or `OPENAI_API_KEY` can be used as fallback raw environment variables. `REQIFY_OPENAI_BASE_URL` can override the default `https://api.openai.com/v1`. ChatGPT Pro and OpenAI API billing are separate, so a ChatGPT Pro subscription still needs API access and an API key for this backend.
 
 Amazon Bedrock configuration:
 

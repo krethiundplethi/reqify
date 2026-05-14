@@ -219,7 +219,13 @@ def create_session(filename: str, content: bytes) -> dict[str, object]:
     return load_payload(session_id)
 
 
-def save_session(session_id: str, updates: dict[str, object], viewed_commit: str, ui_state: object | None = None) -> dict[str, object]:
+def save_session(
+    session_id: str,
+    updates: dict[str, object],
+    viewed_commit: str,
+    ui_state: object | None = None,
+    commit_message: str | None = None,
+) -> dict[str, object]:
     current_head = head_commit(session_id)
     if current_head and viewed_commit != current_head:
         raise ValueError("Save is only allowed while viewing HEAD. Checkout the latest commit before saving.")
@@ -229,7 +235,8 @@ def save_session(session_id: str, updates: dict[str, object], viewed_commit: str
         document.write()
     if ui_state is not None:
         write_ui_state(session_id, ui_state)
-    committed = commit_repo(repo_dir(session_id), f"Save edits {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    message = commit_message.strip() if isinstance(commit_message, str) and commit_message.strip() else f"Save edits {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    committed = commit_repo(repo_dir(session_id), message)
     payload = load_payload(session_id)
     payload["committed"] = committed
     return payload

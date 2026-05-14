@@ -165,7 +165,8 @@ class ReqifyHandler(BaseHTTPRequestHandler):
                     return
                 viewed_commit = str(payload.get("viewedCommit", ""))
                 ui_state = payload.get("uiState")
-                job_id = start_job("Save edits", lambda: save_session(session_id, updates, viewed_commit, ui_state))
+                commit_message = str(payload.get("commitMessage", ""))
+                job_id = start_job("Save edits", lambda: save_session(session_id, updates, viewed_commit, ui_state, commit_message))
                 self.send_json({"jobId": job_id})
             elif path.startswith("/api/session/") and path.endswith("/export"):
                 session_id = path.split("/")[3]
