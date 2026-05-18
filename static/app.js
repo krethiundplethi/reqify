@@ -1019,7 +1019,28 @@ function outlineLevel(objectId) {
   return number.split(".").filter(Boolean).length;
 }
 
+function findSpecificationNode(objectId, nodes = state.specifications) {
+  for (const node of nodes || []) {
+    if (node.objectId === objectId) return node;
+    const match = findSpecificationNode(objectId, node.children || []);
+    if (match) return match;
+  }
+  return null;
+}
+
+function specificationNodeHasVisibleText(node) {
+  for (const child of node?.children || []) {
+    const object = state.objects[child.objectId];
+    if (object && reqifTextAttr(object) && shouldShowDocumentObject(child.objectId)) return true;
+    if (specificationNodeHasVisibleText(child)) return true;
+  }
+  return false;
+}
+
 function chapterHasVisibleContent(index) {
+  const objectId = state.documentOrder[index];
+  const specNode = findSpecificationNode(objectId);
+  if (specNode) return specificationNodeHasVisibleText(specNode);
   const level = outlineLevel(state.documentOrder[index]);
   for (let offset = index + 1; offset < state.documentOrder.length; offset += 1) {
     const objectId = state.documentOrder[offset];

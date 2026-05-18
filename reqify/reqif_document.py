@@ -305,13 +305,8 @@ class ReqifDocument:
             children_container = direct_container(specification, "CHILDREN")
             children = []
             if children_container is not None:
-                heading_index = 0
                 for hierarchy in child_elements(children_container, "SPEC-HIERARCHY"):
-                    object_ref = descendant_text(hierarchy, "SPEC-OBJECT-REF")
                     number = ""
-                    if object_ref and self._is_heading_object(object_ref):
-                        heading_index += 1
-                        number = str(heading_index)
                     node = self._hierarchy_node(hierarchy, number)
                     if node:
                         children.append(node)
